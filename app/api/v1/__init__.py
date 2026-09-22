@@ -10,6 +10,7 @@ from fastapi import APIRouter
 
 from app.api.v1 import (
     auth,
+    comments,
     departments,
     members,
     notifications,
@@ -29,4 +30,5 @@ api_v1_router.include_router(members.router)
 api_v1_router.include_router(roles.router)
 api_v1_router.include_router(projects.router)
 api_v1_router.include_router(tasks.router)
+api_v1_router.include_router(comments.router)
 api_v1_router.include_router(notifications.router)

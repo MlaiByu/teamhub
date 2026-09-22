@@ -17,11 +17,12 @@ from __future__ import annotations
 
 import pytest
 
-from app.core.constants import DataScope
+from app.core.constants import DataScope, MemberStatus
 from app.core.db.context import RequestContext, restore_context, set_context, snapshot_context
 from app.realtime.events import EventType
 from app.realtime.manager import ConnectionManager
-from app.repositories.tenant import TenantRepository
+from app.repositories.tenant import TenantMemberRepository, TenantRepository
+from app.repositories.user import UserRepository
 from app.services import notification_service
 
 pytestmark = pytest.mark.asyncio
@@ -40,15 +41,48 @@ class FakeSocket:
         self.received.append(data)
 
 
-async def _seed_tenant(db_session_factory, *, tenant_id: int, code: str) -> None:
+async def _bootstrap(db_session_factory, *, code: str, username: str) -> tuple[int, int]:
+    """建「租户 + 用户 + ACTIVE 成员关系」，返回 (tenant_id, user_id)。
+
+    ★ 为什么造数据的测试也必须真的建成员关系：
+      `emit` 有一条**结构性守卫**——通知只发给当前租户的 ACTIVE 成员
+      （见 notification_service.emit）。只建租户就 emit 的话会被静默跳过。
+      这条守卫本身也有独立测试（test_emit_to_non_member_is_skipped）。
+    """
     session = db_session_factory()
-    session.add(
-        TenantRepository(session).create(
+    previous = snapshot_context()
+    try:
+        tenant = TenantRepository(session).create(
             code=code, name=f"团队{code}", status="ACTIVE", max_members=50
         )
-    )
-    await session.commit()
-    await session.close()
+        await session.flush()
+        user = UserRepository(session).create(
+            username=username, password_hash="not-a-real-hash", is_active=True
+        )
+        await session.flush()
+        set_context(RequestContext(tenant_id=tenant.id, user_id=user.id, data_scope=DataScope.ALL))
+        TenantMemberRepository(session).create(user_id=user.id, status=str(MemberStatus.ACTIVE))
+        await session.commit()
+        return tenant.id, user.id
+    finally:
+        restore_context(previous)
+        await session.close()
+
+
+async def _add_membership(db_session_factory, *, tenant_id: int, user_id: int) -> None:
+    """把已有用户加进另一个租户。
+
+    用于「同一 user_id 属于两个租户」这个真实场景（`User` 是全局表）。
+    """
+    session = db_session_factory()
+    previous = snapshot_context()
+    try:
+        set_context(RequestContext(tenant_id=tenant_id, user_id=user_id, data_scope=DataScope.ALL))
+        TenantMemberRepository(session).create(user_id=user_id, status=str(MemberStatus.ACTIVE))
+        await session.commit()
+    finally:
+        restore_context(previous)
+        await session.close()
 
 
 async def _emit_as(
@@ -82,18 +116,18 @@ async def _emit_as(
 # emit：落库
 # ----------------------------------------------------------------------
 async def test_emit_persists_notification(db_session_factory):
-    await _seed_tenant(db_session_factory, tenant_id=1, code="acme")
-    event = await _emit_as(db_session_factory, tenant_id=1, user_id=10)
+    tenant_id, user_id = await _bootstrap(db_session_factory, code="acme", username="alice")
+    event = await _emit_as(db_session_factory, tenant_id=tenant_id, user_id=user_id)
 
     assert event is not None
     assert event.payload["tenant_name"] == "Acme"
 
     session = db_session_factory()
     previous = snapshot_context()
-    set_context(RequestContext(tenant_id=1, user_id=10, data_scope=DataScope.ALL))
+    set_context(RequestContext(tenant_id=tenant_id, user_id=user_id, data_scope=DataScope.ALL))
     try:
         items, total = await notification_service.list_notifications(
-            session, user_id=10, unread_only=False, page=1, page_size=10
+            session, user_id=user_id, unread_only=False, page=1, page_size=10
         )
     finally:
         restore_context(previous)
@@ -107,33 +141,37 @@ async def test_emit_persists_notification(db_session_factory):
 
 async def test_emit_pushes_to_connected_socket(db_session_factory):
     """落库之外还要推送——两者都做到才算「事件被正确处理」。"""
-    await _seed_tenant(db_session_factory, tenant_id=1, code="acme")
+    tenant_id, user_id = await _bootstrap(db_session_factory, code="acme", username="alice")
     mgr = ConnectionManager()
     sock = FakeSocket()
-    await mgr.connect(tenant_id=1, user_id=10, websocket=sock)
+    await mgr.connect(tenant_id=tenant_id, user_id=user_id, websocket=sock)
 
-    await _emit_as(db_session_factory, tenant_id=1, user_id=10, manager=mgr)
+    await _emit_as(db_session_factory, tenant_id=tenant_id, user_id=user_id, manager=mgr)
 
     assert len(sock.received) == 1
     msg = sock.received[0]
     assert msg["event"] == "member.joined"
-    assert msg["tenant_id"] == 1
-    assert msg["user_id"] == 10
+    assert msg["tenant_id"] == tenant_id
+    assert msg["user_id"] == user_id
     assert "Acme" in msg["title"]
 
 
 async def test_emit_pushes_only_within_same_tenant(db_session_factory):
-    """★ 同 user_id 在别的租户的连接不能收到。"""
-    await _seed_tenant(db_session_factory, tenant_id=1, code="acme")
-    await _seed_tenant(db_session_factory, tenant_id=2, code="globex")
+    """★ 同一个 user_id 属于两个租户时，通知不能串租户。
+
+    这是真实场景：`User` 是全局表，同一账号可以加入多家公司。
+    """
+    t1, uid = await _bootstrap(db_session_factory, code="acme", username="alice")
+    t2, _other = await _bootstrap(db_session_factory, code="globex", username="bob")
+    await _add_membership(db_session_factory, tenant_id=t2, user_id=uid)
 
     mgr = ConnectionManager()
     sock_t1 = FakeSocket()
     sock_t2 = FakeSocket()
-    await mgr.connect(tenant_id=1, user_id=10, websocket=sock_t1)
-    await mgr.connect(tenant_id=2, user_id=10, websocket=sock_t2)
+    await mgr.connect(tenant_id=t1, user_id=uid, websocket=sock_t1)
+    await mgr.connect(tenant_id=t2, user_id=uid, websocket=sock_t2)
 
-    await _emit_as(db_session_factory, tenant_id=1, user_id=10, manager=mgr)
+    await _emit_as(db_session_factory, tenant_id=t1, user_id=uid, manager=mgr)
 
     assert len(sock_t1.received) == 1
     assert sock_t2.received == [], "租户 2 的连接绝不该收到租户 1 的通知"
@@ -141,8 +179,10 @@ async def test_emit_pushes_only_within_same_tenant(db_session_factory):
 
 async def test_emit_without_connection_still_persists(db_session_factory):
     """用户离线时只落库——恢复后拉列表仍能看到，所以不算丢。"""
-    await _seed_tenant(db_session_factory, tenant_id=1, code="acme")
-    event = await _emit_as(db_session_factory, tenant_id=1, user_id=10, manager=ConnectionManager())
+    tenant_id, user_id = await _bootstrap(db_session_factory, code="acme", username="alice")
+    event = await _emit_as(
+        db_session_factory, tenant_id=tenant_id, user_id=user_id, manager=ConnectionManager()
+    )
     assert event is not None
 
 
@@ -171,15 +211,15 @@ async def test_emit_without_tenant_context_returns_none_and_does_not_raise(db_se
 
 async def test_emit_with_invalid_payload_returns_none(db_session_factory):
     """payload 不合规（缺字段）同样降级，不影响业务返回。"""
-    await _seed_tenant(db_session_factory, tenant_id=1, code="acme")
+    tenant_id, user_id = await _bootstrap(db_session_factory, code="acme", username="alice")
     session = db_session_factory()
     previous = snapshot_context()
-    set_context(RequestContext(tenant_id=1, user_id=10, data_scope=DataScope.ALL))
+    set_context(RequestContext(tenant_id=tenant_id, user_id=user_id, data_scope=DataScope.ALL))
     try:
         result = await notification_service.emit(
             session,
             event_type=EventType.TASK_ASSIGNED,
-            target_user_id=10,
+            target_user_id=user_id,
             task_id=1,  # 缺 task_title / project_id / project_name
         )
     finally:
@@ -190,13 +230,13 @@ async def test_emit_with_invalid_payload_returns_none(db_session_factory):
 
 
 async def test_emit_with_unregistered_event_type_returns_none(db_session_factory):
-    await _seed_tenant(db_session_factory, tenant_id=1, code="acme")
+    tenant_id, user_id = await _bootstrap(db_session_factory, code="acme", username="alice")
     session = db_session_factory()
     previous = snapshot_context()
-    set_context(RequestContext(tenant_id=1, user_id=10, data_scope=DataScope.ALL))
+    set_context(RequestContext(tenant_id=tenant_id, user_id=user_id, data_scope=DataScope.ALL))
     try:
         result = await notification_service.emit(
-            session, event_type="not.a.real.event", target_user_id=10, foo="bar"
+            session, event_type="not.a.real.event", target_user_id=user_id, foo="bar"
         )
     finally:
         restore_context(previous)
@@ -214,27 +254,65 @@ async def test_emit_to_many_dedupes_and_excludes_actor(db_session_factory):
     去重必须在服务端做：客户端传什么就发什么的话，
     一条评论里 `@张三 @张三` 会产生两条通知。
     """
-    await _seed_tenant(db_session_factory, tenant_id=1, code="acme")
+    t1, actor_uid = await _bootstrap(db_session_factory, code="acme", username="actor")
+    _t2, u2 = await _bootstrap(db_session_factory, code="globex", username="bob")
+    _t3, u3 = await _bootstrap(db_session_factory, code="initech", username="carol")
+    # bob / carol 也加入 acme —— emit 的成员守卫要求他们是本租户的 ACTIVE 成员
+    await _add_membership(db_session_factory, tenant_id=t1, user_id=u2)
+    await _add_membership(db_session_factory, tenant_id=t1, user_id=u3)
+
     session = db_session_factory()
     previous = snapshot_context()
-    set_context(RequestContext(tenant_id=1, user_id=99, data_scope=DataScope.ALL))
+    set_context(RequestContext(tenant_id=t1, user_id=actor_uid, data_scope=DataScope.ALL))
     try:
         events = await notification_service.emit_to_many(
             session,
             event_type=EventType.TASK_MENTIONED,
-            target_user_ids=[10, 11, 10, 99],  # 10 重复；99 是触发者
-            actor_id=99,
+            target_user_ids=[u2, u3, u2, actor_uid],  # u2 重复；actor 是触发者
+            actor_id=actor_uid,
             task_id=1,
             task_title="任务",
             comment_id=5,
             excerpt="…",
-            mentioned_by=99,
+            mentioned_by=actor_uid,
         )
     finally:
         restore_context(previous)
         await session.close()
 
-    assert [e.target_user_id for e in events] == [10, 11]
+    assert [e.target_user_id for e in events] == [u2, u3]
+
+
+async def test_emit_to_non_member_is_skipped(db_session_factory):
+    """★ 结构性守卫：通知只发给**当前租户的** ACTIVE 成员。
+
+    少了这条守卫，「给别的公司的人发通知」就不会被拦住——
+    通知行会真的写进库、甚至真的推到 socket 上。
+    """
+    t1, _uid = await _bootstrap(db_session_factory, code="acme", username="alice")
+    _t2, outsider_uid = await _bootstrap(db_session_factory, code="globex", username="bob")
+
+    # 在租户 1 的上下文里，给「只属于租户 2」的人发通知
+    event = await _emit_as(db_session_factory, tenant_id=t1, user_id=outsider_uid)
+    assert event is None
+
+
+async def test_emit_to_disabled_member_is_skipped(db_session_factory):
+    """已停用的成员同样跳过——「人已经离开团队」不该继续收到该团队的动态。"""
+    tenant_id, user_id = await _bootstrap(db_session_factory, code="acme", username="alice")
+
+    session = db_session_factory()
+    previous = snapshot_context()
+    set_context(RequestContext(tenant_id=tenant_id, user_id=user_id, data_scope=DataScope.ALL))
+    try:
+        member = await TenantMemberRepository(session).get_membership(user_id)
+        member.status = str(MemberStatus.DISABLED)
+        await session.commit()
+    finally:
+        restore_context(previous)
+        await session.close()
+
+    assert await _emit_as(db_session_factory, tenant_id=tenant_id, user_id=user_id) is None
 
 
 # ----------------------------------------------------------------------

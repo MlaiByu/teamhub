@@ -33,11 +33,13 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.constants import MemberStatus
 from app.core.db.context import current_tenant_id
 from app.core.logging import get_logger
 from app.realtime.events import EventType, NotificationEvent, render_title
 from app.realtime.manager import ConnectionManager, manager
 from app.repositories.notification import NotificationRepository
+from app.repositories.tenant import TenantMemberRepository
 from app.schemas.notification import NotificationOut
 
 logger = get_logger(__name__)
@@ -102,6 +104,35 @@ async def emit(
         # payload 不合规是**开发期错误**，但同样不能让业务接口 500
         logger.exception(
             "notification_payload_invalid",
+            event_type=str(event_type),
+            target_user_id=target_user_id,
+        )
+        return None
+
+    # ★ 结构性保证：通知只发给**当前租户的 ACTIVE 成员**。
+    #
+    #   放在 emit 这个唯一入口，而不是让每个触发点各自校验——触发点会越来越多
+    #   （任务分配、状态流转、评论、提及、成员加入、角色授予…），靠人记得必然漏一处。
+    #   漏掉的后果很具体：给已经离开团队 / 属于别的公司的人发通知。
+    #   虽然对方因为拿不到该租户的 token 而看不到，但通知行会真的写进库、
+    #   甚至真的推到 socket 上（若连接还挂着）。
+    #
+    #   放在这里之后，整个系统这条不变量只依赖一处代码。
+    #
+    #   ★ 顺序必须是**落库之前**。若放在落库之后，行已经写进库了，
+    #     守卫只能做到「不推送」——库里会留下一批本不该存在的通知，
+    #     用户下次拉列表照样看得到。校验要在写之前。
+    #   代价是每次 emit 多一次按索引的主键查询——相对正确性可以接受。
+    try:
+        member = await TenantMemberRepository(session).get_membership(target_user_id)
+    except Exception:
+        # 上下文/会话异常等：按「无法确认，故不发」处理，不向上抛
+        logger.exception("notification_membership_check_failed", target_user_id=target_user_id)
+        return None
+
+    if member is None or member.status != str(MemberStatus.ACTIVE):
+        logger.info(
+            "notification_target_not_active_member",
             event_type=str(event_type),
             target_user_id=target_user_id,
         )

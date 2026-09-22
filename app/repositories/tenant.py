@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from app.core.constants import MemberStatus
 from app.models import Tenant, TenantMember
 from app.repositories.base import BaseRepository, TenantAwareRepository
 
@@ -100,3 +101,39 @@ class TenantMemberRepository(TenantAwareRepository[TenantMember]):
             stmt = stmt.where(TenantMember.dept_id == dept_id)
         result = await self.session.execute(stmt)
         return result.all()
+
+    async def resolve_usernames(self, usernames: Sequence[str]) -> dict[str, int]:
+        """把一批用户名解析成 `{username: user_id}`，**只认当前租户的 ACTIVE 成员**。
+
+        ★ 一次查询解析一批，不是逐个查：
+          @ 提及可能一次出现好几个名字，逐个查会变成 N+1。
+
+        ★ 为什么要 join `TenantMember` 而不是直接查全局 `users` 表：
+          直接查 users 会解析出**别的租户**的同名用户——那个 user_id 是真实存在的，
+          可以真的被写入通知、真的被推送。所以解析必须限定在「当前租户的成员」
+          这个集合里，天然过滤掉外租户用户与已停用成员。
+
+        ★ 返回 dict 而不是 list：调用方需要知道「哪个名字解析到了谁」，
+          解析不到的名字（拼错、不是成员）静默跳过即可——@ 一个不存在的人
+          不该让评论发不出去。
+        """
+        if not usernames:
+            return {}
+
+        from sqlalchemy import select
+
+        from app.models import User
+
+        self.require_tenant_context()
+        stmt = (
+            select(User.username, User.id)
+            .select_from(TenantMember)
+            .join(User, TenantMember.user_id == User.id)
+            .where(
+                TenantMember.status == str(MemberStatus.ACTIVE),
+                TenantMember.is_deleted.is_(False),
+                User.username.in_(list(usernames)),
+            )
+        )
+        rows = (await self.session.execute(stmt)).all()
+        return dict(rows)
