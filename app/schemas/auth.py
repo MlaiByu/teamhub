@@ -139,3 +139,14 @@ class RegisterResponse(BaseModel):
     user: UserOut
     tenant: TenantBrief
     token: TokenResponse
+
+
+class SwitchTenantResponse(BaseModel):
+    """切换租户的结果：目标租户 + 新的（目标租户作用域的）令牌对。
+
+    ★ 返回新令牌而不是复用旧令牌：access token 是**租户作用域**的，
+      切换租户等于换身份，必须用一张新 token 表达。
+    """
+
+    tenant: TenantBrief
+    token: TokenResponse

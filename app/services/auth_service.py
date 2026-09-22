@@ -97,6 +97,12 @@ class LoginResult:
     token: TokenResponse
 
 
+@dataclass(frozen=True)
+class SwitchTenantResult:
+    tenant: Tenant
+    token: TokenResponse
+
+
 # ----------------------------------------------------------------------
 # 内部工具
 # ----------------------------------------------------------------------
@@ -380,6 +386,70 @@ async def login(session: AsyncSession, *, payload: LoginRequest) -> LoginResult:
 
 
 # ----------------------------------------------------------------------
+# 切换租户
+# ----------------------------------------------------------------------
+async def switch_tenant(
+    session: AsyncSession, *, user_id: int, target_tenant_id: int
+) -> SwitchTenantResult:
+    """切换租户 = 重新签发一张目标租户作用域的 token（8.3）。
+
+    ★ 为什么不改 token、而是重新签发：
+      access token 是**租户作用域**的——tenant_id 写进声明后，
+      它就是「这个用户在这个租户里的身份」。切换租户等于换一个身份，
+      用一张新 token 表达最干净，旧 token 自然过期。
+
+    ★ 陷阱：枚举成员关系前**必须先清空租户上下文**。
+      `list_memberships_for_user` 走的是 raw_select()，而钩子在
+      「当前上下文带 tenant_id」时会注入过滤。切换前的上下文是**旧租户**，
+      若不清空，查询会被过滤到旧租户，目标租户的成员关系永远查不到——
+      切换必然失败，而且报错会让人误以为「你不是成员」。
+    """
+    previous = snapshot_context()
+    try:
+        # 1. 清空租户上下文，枚举用户的全部成员关系（auth 引导查询）
+        set_context(RequestContext(tenant_id=None, user_id=user_id))
+        memberships = await TenantMemberRepository(session).list_memberships_for_user(user_id)
+        target = next((m for m in memberships if m.tenant_id == target_tenant_id), None)
+        if target is None or target.status != str(MemberStatus.ACTIVE):
+            # 不区分「租户不存在」与「你不是成员」——避免存在性泄露
+            raise NotFoundError("租户不存在或你无权访问")
+
+        # 2. 设目标租户上下文，签发新 token
+        set_context(
+            RequestContext(
+                tenant_id=target.tenant_id,
+                user_id=user_id,
+                dept_id=target.dept_id,
+                data_scope=DataScope.SELF,
+            )
+        )
+        user = await load_user(session, user_id)
+        if not user.is_active:
+            raise UnauthenticatedError("账号已被禁用")
+
+        tenant = await TenantRepository(session).get(target.tenant_id)
+        if tenant is None:
+            raise NotFoundError("租户不存在")
+        if tenant.status != str(TenantStatus.ACTIVE):
+            raise UnauthenticatedError(f"租户当前状态为 {tenant.status}，无法切换")
+
+        authorities = await get_user_authorities(session, user_id)
+        token, _ = await _issue_token_pair(
+            session,
+            user=user,
+            tenant_id=target.tenant_id,
+            dept_id=target.dept_id,
+            authorities=authorities,
+        )
+        await session.commit()
+    finally:
+        restore_context(previous)
+
+    logger.info("tenant_switched", user_id=user_id, tenant_id=target.tenant_id)
+    return SwitchTenantResult(tenant=tenant, token=token)
+
+
+# ----------------------------------------------------------------------
 # 刷新（轮换 + 复用检测）
 # ----------------------------------------------------------------------
 async def refresh(session: AsyncSession, *, refresh_token: str) -> TokenResponse:
@@ -518,8 +588,10 @@ async def load_current_tenant(session: AsyncSession) -> Tenant:
 __all__ = [
     "RegisterResult",
     "LoginResult",
+    "SwitchTenantResult",
     "register",
     "login",
+    "switch_tenant",
     "refresh",
     "logout",
     "load_user",
