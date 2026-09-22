@@ -62,6 +62,19 @@ class Settings(BaseSettings):
     # 本地/测试：task_always_eager=True，无需真实 broker（11.2）
     celery_always_eager: bool = True
 
+    # --- 附件存储 ---
+    # 本地模式文件落在项目根下的 local_storage/（已被 .gitignore 忽略）。
+    # 生产换 MinIO 时，这个值改为对象存储的挂载点或干脆走 storage 抽象的另一实现。
+    storage_dir: str = "local_storage"
+
+    # 上传约束
+    max_upload_bytes: int = 10 * 1024 * 1024  # 10 MB
+    # 允许的扩展名白名单。**只允许白名单**——任何不在列表里的都拒，
+    # 防止把 .html/.svg 这种可执行内容当作附件存下来变成 XSS 载体。
+    allowed_upload_exts: set[str] = Field(
+        default_factory=lambda: {"png", "jpg", "jpeg", "gif", "pdf", "txt", "md", "zip"}
+    )
+
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
 
     @field_validator("database_url")

@@ -106,3 +106,16 @@ PLATFORM_ADMIN_ROLE = "PLATFORM_ADMIN"
 TENANT_ADMIN_ROLE = "TENANT_ADMIN"
 DEPT_MANAGER_ROLE = "DEPT_MANAGER"
 MEMBER_ROLE = "MEMBER"
+
+
+class AttachmentBizType(StrEnum):
+    """附件的归属实体类型。
+
+    附件通过 (biz_type, biz_id) 挂到某个实体上。归属校验必须走该实体
+    自己的守卫查询——挂到任务时确认任务可见，挂到项目时确认项目可见。
+    目前只支持任务与项目两类；新增实体时先加这里的成员，再在
+    attachment_service 的归属校验里补一条分支。
+    """
+
+    TASK = "task"
+    PROJECT = "project"
