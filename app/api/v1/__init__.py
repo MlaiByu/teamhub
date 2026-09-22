@@ -19,6 +19,7 @@ from app.api.v1 import (
     system,
     tasks,
     tenants,
+    ws,
 )
 
 api_v1_router = APIRouter()
@@ -32,3 +33,4 @@ api_v1_router.include_router(projects.router)
 api_v1_router.include_router(tasks.router)
 api_v1_router.include_router(comments.router)
 api_v1_router.include_router(notifications.router)
+api_v1_router.include_router(ws.router)
