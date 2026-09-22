@@ -1,0 +1,117 @@
+[project]
+name = "teamhub"
+version = "0.1.0"
+description = "多租户团队协作平台：共享库 + 行级隔离，查询层自动注入双层过滤"
+# ★ Python 版本以 3.12 为唯一锚点（2026-09-21 对齐）。
+#   此前四处声明不一致：pyproject 写 >=3.11 / ruff 与 mypy 按 3.11 做静态检查 /
+#   Dockerfile 与 CI 实际跑 3.12 / 本机 venv 是 3.13。不一致的代价是
+#   「本地绿、容器炸」这类只在部署时才暴露的问题。
+#   选 3.12 而非 3.13 的理由：Dockerfile 与 CI 已经是 3.12（已被验证），
+#   而本机 3.13 来自 WorkBuddy 托管运行时，不受本项目控制。
+#   改这一项时必须同步三处：本行、[tool.ruff] target-version、[tool.mypy] python_version。
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "sqlalchemy[asyncio]>=2.0.36",
+    "alembic>=1.14",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "asyncpg>=0.30",
+    "aiosqlite>=0.20",
+    "greenlet>=3.1",
+    "structlog>=24.4",
+    "pyjwt>=2.9",
+    "passlib[bcrypt]>=1.7.4",
+    "bcrypt>=4.0,<5",
+    "redis>=5.2",
+    "fakeredis>=2.26",
+    "celery>=5.4",
+    "python-multipart>=0.0.17",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=6.0",
+    "httpx>=0.28",
+    "ruff>=0.8",
+    "mypy>=1.13",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+# ----------------------------------------------------------------------
+# ruff：lint + format。CI 第一道闸（PROJECT-PLAN 11.3）
+# ----------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["app", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4", "SIM", "ASYNC", "S"]
+ignore = [
+    "S101",   # assert：测试里必须用
+    "B008",   # FastAPI 的 Depends() 默认参数是框架惯用法
+    "E501",   # 行宽交给 formatter
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S105", "S106"]  # 测试里的假密钥
+# security.py 的 token_type="access"/"refresh" 被 S106 误判为硬编码密码。
+# 只在这一行级场景忽略，不全局关规则——S106 对真正的硬编码口令仍然有效。
+"app/core/security.py" = ["S106"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
+# ----------------------------------------------------------------------
+# pytest
+# ----------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-q --strict-markers"
+markers = [
+    "security: 隔离与越权测试（本项目最重要的一类）",
+]
+
+# ----------------------------------------------------------------------
+# coverage：核心 service ≥ 80%，整体 ≥ 70%（10.4）
+# ----------------------------------------------------------------------
+[tool.coverage.run]
+source = ["app"]
+omit = ["app/main.py"]
+# ★ 必须声明 greenlet 并发，否则覆盖率会严重低报。
+#
+#   SQLAlchemy 的 async 引擎内部用 greenlet 把同步驱动桥接成异步。
+#   代码一旦 `await session.execute(...)`，执行流会切进 greenlet，
+#   而 coverage 默认只按 thread 跟踪执行上下文——切出去之后同一个
+#   协程函数里的后续行**不再被记录**。
+#
+#   症状很有迷惑性：整个 `async def` 只统计到 `def` 那一行，
+#   函数体全部算「未覆盖」。测试明明断言了返回 200，覆盖率却显示没跑过。
+#   2026-09-22 在 auth_service 上发现：47% 的报告实际是 100% 被执行的代码。
+#   加上这一行后同一批测试的覆盖率才反映真实情况。
+concurrency = ["greenlet", "thread"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]
+
+[tool.mypy]
+python_version = "3.12"
+plugins = ["pydantic.mypy"]
+ignore_missing_imports = true
+warn_unused_ignores = false
