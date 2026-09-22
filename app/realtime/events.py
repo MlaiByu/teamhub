@@ -145,9 +145,17 @@ class RoleAssignedPayload(_Payload):
 # ----------------------------------------------------------------------
 @dataclass(frozen=True)
 class EventSpec:
-    """一个事件类型的完整描述。"""
+    """一个事件类型的完整描述。
 
-    type: EventType
+    ★ 字段名用 `event_type` 而不是 `type`：后者会在**类体作用域内遮蔽内建
+      `type`**，于是同一类里 `payload_model: type[_Payload]` 这个注解会被解析成
+      「`EventSpec.type` 这个字段」而不是内建类型，mypy 直接报
+      `Variable "EventSpec.type" is not valid as a type`。
+      这类遮蔽在运行期无害（注解不执行），但会让类型检查失效——
+      而类型检查正是我们想让它帮忙的地方。
+    """
+
+    event_type: EventType
     payload_model: type[_Payload]
     # 标题模板的占位符必须与 payload 字段同名——渲染时按 payload 取
     title_template: str
@@ -155,32 +163,32 @@ class EventSpec:
 
 EVENT_SPECS: dict[EventType, EventSpec] = {
     EventType.TASK_ASSIGNED: EventSpec(
-        type=EventType.TASK_ASSIGNED,
+        event_type=EventType.TASK_ASSIGNED,
         payload_model=TaskAssignedPayload,
         title_template="任务「{task_title}」已分配给你",
     ),
     EventType.TASK_STATUS_CHANGED: EventSpec(
-        type=EventType.TASK_STATUS_CHANGED,
+        event_type=EventType.TASK_STATUS_CHANGED,
         payload_model=TaskStatusChangedPayload,
         title_template="任务「{task_title}」状态由 {from_status} 变为 {to_status}",
     ),
     EventType.TASK_COMMENTED: EventSpec(
-        type=EventType.TASK_COMMENTED,
+        event_type=EventType.TASK_COMMENTED,
         payload_model=TaskCommentedPayload,
         title_template="任务「{task_title}」有新评论：{excerpt}",
     ),
     EventType.TASK_MENTIONED: EventSpec(
-        type=EventType.TASK_MENTIONED,
+        event_type=EventType.TASK_MENTIONED,
         payload_model=TaskMentionedPayload,
         title_template="在任务「{task_title}」的评论中有人 @ 了你：{excerpt}",
     ),
     EventType.MEMBER_JOINED: EventSpec(
-        type=EventType.MEMBER_JOINED,
+        event_type=EventType.MEMBER_JOINED,
         payload_model=MemberJoinedPayload,
         title_template="你已加入团队「{tenant_name}」",
     ),
     EventType.ROLE_ASSIGNED: EventSpec(
-        type=EventType.ROLE_ASSIGNED,
+        event_type=EventType.ROLE_ASSIGNED,
         payload_model=RoleAssignedPayload,
         title_template="你被授予角色「{role_name}」",
     ),
@@ -277,7 +285,7 @@ class NotificationEvent:
     ) -> NotificationEvent:
         """构造事件：顺带完成 payload 校验。"""
         return cls(
-            type=get_spec(event_type).type,
+            type=get_spec(event_type).event_type,
             tenant_id=tenant_id,
             target_user_id=target_user_id,
             actor_id=actor_id,

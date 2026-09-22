@@ -48,9 +48,13 @@ def test_every_event_type_is_registered():
 
 
 def test_spec_type_matches_its_key():
-    """注册表的 key 与 spec.type 必须一致（手写注册表容易漏改一处）。"""
+    """注册表的 key 与 spec.event_type 必须一致（手写注册表容易漏改一处）。
+
+    注：字段名是 `event_type` 而不是 `type`——后者会在类体内遮蔽内建 `type`，
+    导致同类的 `payload_model: type[_Payload]` 注解被 mypy 解析成该字段。
+    """
     for key, spec in EVENT_SPECS.items():
-        assert spec.type == key, f"{key} 的 spec.type 是 {spec.type}"
+        assert spec.event_type == key, f"{key} 的 spec.event_type 是 {spec.event_type}"
 
 
 @pytest.mark.parametrize("event_type", list(EventType), ids=lambda t: str(t))
@@ -147,8 +151,8 @@ def test_build_payload_rejects_unregistered_type():
 
 
 def test_get_spec_accepts_string_and_enum():
-    assert get_spec(EventType.TASK_ASSIGNED).type is EventType.TASK_ASSIGNED
-    assert get_spec("task.assigned").type is EventType.TASK_ASSIGNED
+    assert get_spec(EventType.TASK_ASSIGNED).event_type is EventType.TASK_ASSIGNED
+    assert get_spec("task.assigned").event_type is EventType.TASK_ASSIGNED
 
 
 def test_get_spec_raises_on_unknown():

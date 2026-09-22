@@ -12,8 +12,10 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from sqlalchemy import Row
+
 from app.core.constants import MemberStatus
-from app.models import Tenant, TenantMember
+from app.models import Tenant, TenantMember, User
 from app.repositories.base import BaseRepository, TenantAwareRepository
 
 
@@ -77,7 +79,9 @@ class TenantMemberRepository(TenantAwareRepository[TenantMember]):
         # 不手写 tenant_id：租户过滤由钩子注入
         return int((await self.session.execute(stmt)).scalar_one())
 
-    async def list_with_users(self, *, dept_id: int | None = None) -> Sequence[tuple]:
+    async def list_with_users(
+        self, *, dept_id: int | None = None
+    ) -> Sequence[Row[tuple[TenantMember, User]]]:
         """列出成员并 join 出用户信息（用户名 / 邮箱）。
 
         ★ join 的租户安全性：`TenantMember` 是租户级表，`do_orm_execute` 钩子会
@@ -136,4 +140,4 @@ class TenantMemberRepository(TenantAwareRepository[TenantMember]):
             )
         )
         rows = (await self.session.execute(stmt)).all()
-        return dict(rows)
+        return {row[0]: row[1] for row in rows}

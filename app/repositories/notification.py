@@ -10,8 +10,9 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import UTC, datetime
+from typing import Any, cast
 
-from sqlalchemy import Select, func, select, update
+from sqlalchemy import CursorResult, Select, func, select, update
 
 from app.models import Notification
 from app.repositories.base import TenantAwareRepository
@@ -82,7 +83,9 @@ class NotificationRepository(TenantAwareRepository[Notification]):
             )
             .values(read_at=datetime.now(UTC), updated_at=datetime.now(UTC))
         )
-        result = await self.session.execute(stmt)
+        # session.execute(update(...)) 运行期返回 CursorResult（带 rowcount），
+        # 但静态类型标注是 Result[Any]——cast 反映运行期事实。
+        result = cast("CursorResult[Any]", await self.session.execute(stmt))
         return int(result.rowcount or 0)
 
     async def mark_all_read(self, *, user_id: int) -> int:
@@ -96,5 +99,7 @@ class NotificationRepository(TenantAwareRepository[Notification]):
             )
             .values(read_at=datetime.now(UTC), updated_at=datetime.now(UTC))
         )
-        result = await self.session.execute(stmt)
+        # session.execute(update(...)) 运行期返回 CursorResult（带 rowcount），
+        # 但静态类型标注是 Result[Any]——cast 反映运行期事实。
+        result = cast("CursorResult[Any]", await self.session.execute(stmt))
         return int(result.rowcount or 0)
