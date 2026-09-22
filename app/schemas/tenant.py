@@ -53,3 +53,38 @@ class TenantMemberOut(BaseModel):
     status: str
     dept_id: int | None = None
     created_at: datetime
+
+
+class MemberOut(BaseModel):
+    """成员 + 用户信息（member 列表返回）。
+
+    ★ 不直接用 `TenantMemberOut`：管理界面要展示的是**用户名与邮箱**，
+      而它们存在全局 `users` 表。所以这里手工组装两表的字段，
+      而不是把 ORM join 结果原样吐出去——「哪些字段能出去」在一处显式可见。
+    """
+
+    id: int
+    user_id: int
+    username: str
+    email: str | None = None
+    status: str
+    dept_id: int | None = None
+    created_at: datetime
+
+
+class MemberAddRequest(BaseModel):
+    """把**已注册**的用户加入当前租户。
+
+    ★ 按 username 而不是 user_id：管理员记的是用户名，不是数据库主键。
+      「邀请未注册的人」属于邀请流（阶段 5 的异步任务），这里只处理
+      「把一个已有账号拉进团队」。
+    """
+
+    username: str = Field(min_length=1, max_length=64, examples=["guotao"])
+    dept_id: int | None = Field(None, description="加入后归属的部门")
+
+
+class AssignRoleRequest(BaseModel):
+    """给成员绑定角色。"""
+
+    role_id: int = Field(gt=0, description="要绑定的角色 ID")

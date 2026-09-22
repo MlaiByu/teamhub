@@ -8,10 +8,11 @@
 
 from fastapi import APIRouter
 
-from app.api.v1 import auth, departments, system, tenants
+from app.api.v1 import auth, departments, members, system, tenants
 
 api_v1_router = APIRouter()
 api_v1_router.include_router(system.router)
 api_v1_router.include_router(auth.router)
 api_v1_router.include_router(tenants.router)
 api_v1_router.include_router(departments.router)
+api_v1_router.include_router(members.router)

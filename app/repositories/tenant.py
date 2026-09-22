@@ -73,5 +73,30 @@ class TenantMemberRepository(TenantAwareRepository[TenantMember]):
         from sqlalchemy import func, select
 
         stmt = select(func.count()).select_from(self.model).where(self.model.is_deleted.is_(False))
-        # 不过手写 tenant_id：租户过滤由钩子注入
+        # 不手写 tenant_id：租户过滤由钩子注入
         return int((await self.session.execute(stmt)).scalar_one())
+
+    async def list_with_users(self, *, dept_id: int | None = None) -> Sequence[tuple]:
+        """列出成员并 join 出用户信息（用户名 / 邮箱）。
+
+        ★ join 的租户安全性：`TenantMember` 是租户级表，`do_orm_execute` 钩子会
+          对它的所有查询注入 `tenant_id == 当前租户`；`User` 是全局表不过滤。
+          所以这个 join 只会返回**本租户**的成员，同时带出全局用户信息——
+          不会把别的租户的成员泄进来。
+        """
+        from sqlalchemy import select
+
+        from app.models import User
+
+        self.require_tenant_context()
+        stmt = (
+            select(TenantMember, User)
+            .select_from(TenantMember)
+            .join(User, TenantMember.user_id == User.id)
+            .where(TenantMember.is_deleted.is_(False))
+            .order_by(TenantMember.id)
+        )
+        if dept_id is not None:
+            stmt = stmt.where(TenantMember.dept_id == dept_id)
+        result = await self.session.execute(stmt)
+        return result.all()

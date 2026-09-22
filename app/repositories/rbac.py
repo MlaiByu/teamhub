@@ -62,6 +62,15 @@ class UserRoleRepository(TenantAwareRepository[UserRole]):
         result = await self.session.execute(stmt)
         return [row.role_id for row in result.scalars().unique().all()]
 
+    async def find_binding(self, *, user_id: int, role_id: int) -> UserRole | None:
+        """查某用户是否已绑定某角色。用于绑定前的幂等判断。"""
+        stmt = self.base_select().where(
+            UserRole.user_id == user_id,
+            UserRole.role_id == role_id,
+        )
+        result = await self.session.execute(stmt)
+        return result.scalars().unique().one_or_none()
+
     async def bind(self, *, user_id: int, role_id: int) -> UserRole:
         """绑定角色。重复绑定会撞 UNIQUE(tenant_id, user_id, role_id)。"""
         return self.create(user_id=user_id, role_id=role_id)
