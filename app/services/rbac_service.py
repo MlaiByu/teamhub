@@ -26,8 +26,9 @@ from app.core.constants import (
     widest_scope,
 )
 from app.core.db.context import current_tenant_id
-from app.core.exceptions import TenantContextMissingError
+from app.core.exceptions import ConflictError, TenantContextMissingError
 from app.core.logging import get_logger
+from app.models import Role
 from app.repositories.rbac import RoleRepository, UserRoleRepository
 
 logger = get_logger(__name__)
@@ -132,3 +133,31 @@ async def bind_role(session: AsyncSession, *, user_id: int, role_id: int) -> Non
     """绑定角色到用户（当前租户内）。"""
     await UserRoleRepository(session).bind(user_id=user_id, role_id=role_id)
     await session.flush()
+
+
+# ----------------------------------------------------------------------
+# 角色管理（接口层）
+# ----------------------------------------------------------------------
+async def list_roles(session: AsyncSession) -> list[Role]:
+    """列出当前租户的全部角色。"""
+    stmt = RoleRepository(session).base_select().order_by(Role.id)
+    result = await session.execute(stmt)
+    return list(result.scalars().unique().all())
+
+
+async def create_role(session: AsyncSession, *, code: str, name: str, data_scope: str) -> Role:
+    """创建角色（要求已设租户上下文，由路由依赖保证）。
+
+    唯一约束是 (tenant_id, code)——两个租户可以用同一个角色编码，
+    同一租户内编码必须唯一。预检给友好 409，真正的保证在数据库约束上。
+    """
+    repo = RoleRepository(session)
+    if await repo.get_by_code(code) is not None:
+        raise ConflictError("角色编码已存在")
+
+    role = repo.create(code=code, name=name, data_scope=str(data_scope))
+    await session.flush()
+    await session.commit()
+
+    logger.info("role_created", code=code, data_scope=str(data_scope))
+    return role
