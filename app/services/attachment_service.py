@@ -34,6 +34,7 @@ from app.models import Attachment
 from app.repositories.attachment import AttachmentRepository
 from app.repositories.project import ProjectRepository
 from app.repositories.task import TaskRepository
+from app.services import audit_service
 
 logger = get_logger(__name__)
 
@@ -127,6 +128,13 @@ async def upload(
         biz_type=biz_type,
         biz_id=biz_id,
         size=len(data),
+    )
+    await audit_service.record(
+        session,
+        action="attachment.upload",
+        entity_type="attachment",
+        entity_id=attachment.id,
+        detail={"biz_type": biz_type, "biz_id": biz_id, "size": len(data)},
     )
     return attachment
 

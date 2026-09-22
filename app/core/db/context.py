@@ -21,6 +21,10 @@ current_dept_id: ContextVar[int | None] = ContextVar("current_dept_id", default=
 current_data_scope: ContextVar[DataScope] = ContextVar("current_data_scope", default=DataScope.SELF)
 # 平台级绕过开关。只有显式 bypass 路径会打开，且必须落审计。
 _current_bypass: ContextVar[bool] = ContextVar("current_bypass", default=False)
+# 客户端 IP，用于审计日志。由中间件在请求进入时写入。
+# 单独一个 contextvar 而不是塞进 RequestContext：它不参与过滤/隔离，
+# 只是审计的附属信息，混进 RequestContext 会误导「改上下文=改隔离」。
+current_client_ip: ContextVar[str | None] = ContextVar("current_client_ip", default=None)
 
 
 @dataclass(frozen=True)
@@ -52,6 +56,7 @@ def reset_context() -> None:
     current_dept_id.set(None)
     current_data_scope.set(DataScope.SELF)
     _current_bypass.set(False)
+    current_client_ip.set(None)
 
 
 def is_bypass() -> bool:

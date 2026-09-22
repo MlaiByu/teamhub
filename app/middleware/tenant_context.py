@@ -15,15 +15,35 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from app.core.constants import DataScope
-from app.core.db.context import RequestContext, reset_context, set_context
+from app.core.db.context import (
+    RequestContext,
+    current_client_ip,
+    reset_context,
+    set_context,
+)
 from app.core.logging import get_logger
 from app.core.security import decode_token
 
 logger = get_logger(__name__)
 
 
+def _client_ip(request: Request) -> str | None:
+    """取客户端 IP，优先可信代理头。
+
+    ★ 直连部署时 `request.client.host` 就是真实 IP；但一旦前面有反代/Nginx，
+      它就变成反代的 IP。所以优先读 `X-Forwarded-For` 的第一个（最靠近客户端的）。
+      注意：这个头**客户端可伪造**，只用于审计留痕、不做安全决策——
+      真正做限流/封禁时要用「可信代理白名单」来判定，不能盲信。
+    """
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else None
+
+
 class TenantContextMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+        current_client_ip.set(_client_ip(request))
         auth = request.headers.get("Authorization", "")
         scheme, _, token = auth.partition(" ")
 

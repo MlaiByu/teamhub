@@ -16,6 +16,7 @@ from app.core.exceptions import ConflictError
 from app.core.logging import get_logger
 from app.models import Project
 from app.repositories.project import ProjectRepository
+from app.services import audit_service
 
 logger = get_logger(__name__)
 
@@ -49,6 +50,13 @@ async def create_project(
     await session.commit()
 
     logger.info("project_created", project_id=project.id, code=code)
+    await audit_service.record(
+        session,
+        action="project.create",
+        entity_type="project",
+        entity_id=project.id,
+        detail={"code": code, "name": name},
+    )
     return project
 
 
@@ -101,4 +109,11 @@ async def update_project(session: AsyncSession, project_id: int, *, changes: dic
     await session.refresh(project)
 
     logger.info("project_updated", project_id=project_id, fields=sorted(changes))
+    await audit_service.record(
+        session,
+        action="project.update",
+        entity_type="project",
+        entity_id=project_id,
+        detail={"fields": sorted(changes)},
+    )
     return project

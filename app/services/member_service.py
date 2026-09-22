@@ -18,7 +18,7 @@ from app.repositories.rbac import RoleRepository, UserRoleRepository
 from app.repositories.tenant import TenantMemberRepository, TenantRepository
 from app.repositories.user import UserRepository
 from app.schemas.tenant import MemberOut
-from app.services import notification_service
+from app.services import audit_service, notification_service
 
 logger = get_logger(__name__)
 
@@ -93,6 +93,14 @@ async def add_member(
 
     logger.info("member_added", user_id=added_user_id, tenant_id=tenant_id)
 
+    await audit_service.record(
+        session,
+        action="member.join",
+        entity_type="member",
+        entity_id=added_user_id,
+        detail={"username": username, "dept_id": dept_id},
+    )
+
     # ★ 通知被加入的人。注意此刻他**还没有任何角色**（角色要另行绑定），
     #   所以 role_codes 传空列表——不要为了「通知好看」去猜一个角色名。
     #   emit 的成员守卫要求目标是本租户 ACTIVE 成员，而这一步刚好满足。
@@ -150,6 +158,14 @@ async def assign_role(
     await session.commit()
 
     logger.info("role_assigned", user_id=target_user_id, role_id=role_id, member_id=member_id)
+
+    await audit_service.record(
+        session,
+        action="role.assign",
+        entity_type="role",
+        entity_id=role_id,
+        detail={"member_id": member_id, "role_code": role_code, "target_user_id": target_user_id},
+    )
 
     # 排除操作者给自己授权——自己给自己绑角色不必通知自己
     if target_user_id != actor_id:

@@ -26,7 +26,7 @@ from app.realtime.events import EventType
 from app.repositories.comment import TaskCommentRepository
 from app.repositories.task import TaskRepository
 from app.repositories.tenant import TenantMemberRepository
-from app.services import notification_service
+from app.services import audit_service, notification_service
 
 logger = get_logger(__name__)
 
@@ -115,6 +115,13 @@ async def create_comment(
     )
 
     logger.info("comment_created", comment_id=comment_id, task_id=task_id, author_id=author_id)
+    await audit_service.record(
+        session,
+        action="comment.create",
+        entity_type="comment",
+        entity_id=comment_id,
+        detail={"task_id": task_id},
+    )
     return comment
 
 

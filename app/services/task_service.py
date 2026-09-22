@@ -37,7 +37,7 @@ from app.realtime.events import EventType
 from app.repositories.project import ProjectRepository
 from app.repositories.task import TaskRepository
 from app.repositories.tenant import TenantMemberRepository
-from app.services import notification_service
+from app.services import audit_service, notification_service
 
 logger = get_logger(__name__)
 
@@ -178,6 +178,14 @@ async def create_task(
 
     logger.info("task_created", task_id=new_task_id, project_id=project_id, assignee_id=assignee_id)
 
+    await audit_service.record(
+        session,
+        action="task.create",
+        entity_type="task",
+        entity_id=new_task_id,
+        detail={"project_id": project_id, "assignee_id": assignee_id, "title": new_task_title},
+    )
+
     # ★ 事件必须在业务 commit 之后发（见 notification_service 的时序约定）。
     #   排除「自己分配给自己」——那不该产生通知。
     if assignee_id is not None and assignee_id != creator_id:
@@ -263,6 +271,14 @@ async def update_task(
 
     logger.info("task_updated", task_id=task_id, fields=sorted(changes))
 
+    await audit_service.record(
+        session,
+        action="task.update",
+        entity_type="task",
+        entity_id=task_id,
+        detail={"fields": sorted(changes)},
+    )
+
     # 改派事件：新执行人存在、确实换了人、且不是操作者本人给自己派活
     if (
         current_assignee is not None
@@ -317,6 +333,14 @@ async def change_status(
     # 同 project/task 的 update：updated_at 是服务端生成的，UPDATE 后会过期
     await session.refresh(task)
     logger.info("task_status_changed", task_id=task_id, status=str(target))
+
+    await audit_service.record(
+        session,
+        action="task.status_changed",
+        entity_type="task",
+        entity_id=task_id,
+        detail={"from": from_status, "to": str(target)},
+    )
 
     # 通知执行人，但**排除操作者本人**——自己推进自己的任务不该收到通知
     if assignee_id is not None and assignee_id != actor_id:
