@@ -15,7 +15,10 @@ jobs:
     # —— 这正是 PROJECT-PLAN 11.2 想验证的事：别人 clone 下来就能跑
     env:
       APP_ENV: test
-      DATABASE_URL: sqlite+aiosqlite:///:memory:
+      # ★ 必须加引号：不加引号时 YAML 会把值末尾的冒号当成嵌套 mapping 的键，
+      #   整个工作流在加载阶段就被拒（症状是 run 同一秒内 failed 且 0 个 job，
+      #   而不是某个步骤失败——很容易误判成代码问题）。
+      DATABASE_URL: "sqlite+aiosqlite:///:memory:"
       USE_FAKEREDIS: "true"
       CELERY_ALWAYS_EAGER: "true"
       JWT_SECRET: ci-only-not-a-real-secret
