@@ -1,14 +1,41 @@
-"""任务领域 service。第 1 周只落地跨租户外键校验（矩阵 8），
-完整的状态流转在第 4 周实现（PROJECT-PLAN 十二）。
+"""任务领域 service。
+
+★ 本模块有两个「钩子覆盖不到」的跨租户校验，必须显式写：
+
+  1. **`project_id`** —— 走守卫查询（`ProjectRepository.get`），别的租户的
+     项目 ID 自然返回 None。这一条是「免费」的。
+
+  2. **`assignee_id`** —— **必须显式校验**。`assignee_id` 指向全局 `users` 表，
+     而 `User` 不带 `tenant_id`、不在租户过滤范围内，钩子对它无能为力；
+     数据库外键也只保证「users 里存在这个 id」。不校验的话，A 公司的任务
+     可以分配给 B 公司的人，对方甚至会在自己的待办里看到它。
+     这是本项目里唯一需要人工兜底的一类引用——因为它是**跨租户边界的
+     唯一「全局表 → 租户表」引用**。
+
+  另有 `ensure_same_tenant`：留给「对象不是通过守卫查询拿到」的场景
+  （例如调用方自己持有对象、或走了 bypass）。当前 API 路径用不到它，
+  但它是矩阵 8 的落地点，保留并持续被测试覆盖。
 """
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Protocol
 
-from app.core.constants import TASK_STATUS_TRANSITIONS, TaskStatus
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.constants import (
+    TASK_STATUS_TRANSITIONS,
+    MemberStatus,
+    TaskPriority,
+    TaskStatus,
+)
 from app.core.exceptions import ConflictError, NotFoundError
 from app.core.logging import get_logger
+from app.models import Task, TenantMember
+from app.repositories.project import ProjectRepository
+from app.repositories.task import TaskRepository
+from app.repositories.tenant import TenantMemberRepository
 
 logger = get_logger(__name__)
 
@@ -64,3 +91,138 @@ def validate_status_transition(current: str, target: str) -> None:
         raise ConflictError(
             f"不允许从 {cur} 流转到 {tgt}；可选：{[s.value for s in allowed] or '无（终态）'}"
         )
+
+
+async def ensure_assignee_is_member(session: AsyncSession, user_id: int) -> TenantMember:
+    """校验被分配人是**当前租户**的 ACTIVE 成员。返回其成员关系。
+
+    ★ 为什么必须显式做（钩子覆盖不到）：
+      `assignee_id` 指向全局 `users` 表——`User` 不带 tenant_id，
+      不在租户过滤范围内；外键也只保证「users 里存在这个 id」。
+      不校验就能把任务分配给别的公司的人。
+
+    返回 404 而不是 403：不泄露「这个 user_id 存在，只是不在你团队」。
+    """
+    member = await TenantMemberRepository(session).get_membership(user_id)
+    if member is None or member.status != str(MemberStatus.ACTIVE):
+        logger.warning("assignee_not_in_tenant", user_id=user_id)
+        raise NotFoundError("被分配人不存在或不是本团队的成员")
+    return member
+
+
+def _resolve_owner(
+    *, creator_id: int, creator_dept_id: int | None, assignee_member: TenantMember | None
+) -> tuple[int, int | None]:
+    """推导任务的 owner_id / dept_id（二者都描述「负责人」）。
+
+    ★ owner 取**被分配人**而不是创建者：SELF 数据范围的语义因此是
+      「分配给我的任务」。若取创建者，被管理员分配任务的普通成员
+      会在自己的任务列表里看不到它——明显的可用性事故。
+
+      没人被分配时，任务还没有负责人，退回创建者。
+    """
+    if assignee_member is not None:
+        return assignee_member.user_id, assignee_member.dept_id
+    return creator_id, creator_dept_id
+
+
+async def create_task(
+    session: AsyncSession,
+    *,
+    project_id: int,
+    title: str,
+    description: str | None,
+    assignee_id: int | None,
+    status: TaskStatus,
+    priority: TaskPriority,
+    due_at: datetime | None,
+    creator_id: int,
+    creator_dept_id: int | None,
+) -> Task:
+    """创建任务（要求已设租户上下文）。"""
+    # 项目走守卫查询：跨租户 / 超出数据范围都返回 None → 404
+    if await ProjectRepository(session).get(project_id) is None:
+        raise NotFoundError("项目不存在或无权访问")
+
+    assignee_member: TenantMember | None = None
+    if assignee_id is not None:
+        assignee_member = await ensure_assignee_is_member(session, assignee_id)
+
+    owner_id, dept_id = _resolve_owner(
+        creator_id=creator_id, creator_dept_id=creator_dept_id, assignee_member=assignee_member
+    )
+
+    task = TaskRepository(session).create(
+        project_id=project_id,
+        title=title,
+        description=description,
+        assignee_id=assignee_id,
+        status=str(status),
+        priority=str(priority),
+        due_at=due_at,
+        owner_id=owner_id,
+        dept_id=dept_id,
+    )
+    await session.flush()
+    await session.commit()
+
+    logger.info("task_created", task_id=task.id, project_id=project_id, assignee_id=assignee_id)
+    return task
+
+
+async def list_tasks(
+    session: AsyncSession,
+    *,
+    project_id: int | None,
+    assignee_id: int | None,
+    status: str | None,
+    page: int,
+    page_size: int,
+) -> tuple[list[Task], int]:
+    """分页列出任务。租户过滤与数据范围过滤由钩子注入。"""
+    items, total = await TaskRepository(session).paginate_filtered(
+        project_id=project_id,
+        assignee_id=assignee_id,
+        status=status,
+        page=page,
+        page_size=page_size,
+    )
+    return list(items), total
+
+
+async def get_task(session: AsyncSession, task_id: int) -> Task:
+    """按主键取任务。跨租户或超出数据范围时 404。"""
+    return await TaskRepository(session).get_or_404(task_id)
+
+
+async def update_task(session: AsyncSession, task_id: int, *, changes: dict) -> Task:
+    """局部更新任务。
+
+    `changes` 由路由用 `model_dump(exclude_unset=True, mode="json")` 产出。
+    若其中含 `assignee_id`，需要重新校验成员关系并重算 owner_id / dept_id——
+    否则改派之后任务的数据归属还挂在原负责人名下，列表可见性会跟着错。
+    """
+    task = await TaskRepository(session).get_or_404(task_id)
+
+    if "assignee_id" in changes:
+        new_assignee = changes["assignee_id"]
+        if new_assignee is not None:
+            member = await ensure_assignee_is_member(session, new_assignee)
+            # 有新负责人 → 归属跟着负责人走
+            task.owner_id, task.dept_id = member.user_id, member.dept_id
+        else:
+            # 取消分配 → 回到创建者名下。dept_id 保持不动：
+            # 我们没存创建者当时的部门，猜一个值反而更不可预测。
+            task.owner_id = task.created_by or task.owner_id
+
+    for field, value in changes.items():
+        setattr(task, field, value)
+
+    await session.commit()
+
+    # 理由同 project_service：`updated_at` 是服务端 onupdate 生成的，
+    # UPDATE 后会被标记过期，异步下访问会抛 MissingGreenlet。
+    await session.refresh(task)
+
+    logger.info("task_updated", task_id=task_id, fields=sorted(changes))
+    return task

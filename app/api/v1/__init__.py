@@ -8,7 +8,7 @@
 
 from fastapi import APIRouter
 
-from app.api.v1 import auth, departments, members, projects, roles, system, tenants
+from app.api.v1 import auth, departments, members, projects, roles, system, tasks, tenants
 
 api_v1_router = APIRouter()
 api_v1_router.include_router(system.router)
@@ -18,3 +18,4 @@ api_v1_router.include_router(departments.router)
 api_v1_router.include_router(members.router)
 api_v1_router.include_router(roles.router)
 api_v1_router.include_router(projects.router)
+api_v1_router.include_router(tasks.router)
