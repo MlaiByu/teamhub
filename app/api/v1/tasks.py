@@ -21,7 +21,12 @@ from app.core.constants import TaskStatus
 from app.core.db.session import get_db
 from app.core.responses import Envelope, PageData, ok, paged
 from app.schemas.common import PageParams
-from app.schemas.task import TaskCreateRequest, TaskOut, TaskUpdateRequest
+from app.schemas.task import (
+    TaskCreateRequest,
+    TaskOut,
+    TaskStatusUpdateRequest,
+    TaskUpdateRequest,
+)
 from app.services import task_service
 
 router = APIRouter(prefix="/tasks", tags=["任务"])
@@ -135,3 +140,33 @@ async def update_task(
     changes = payload.model_dump(exclude_unset=True, mode="json")
     task = await task_service.update_task(session, task_id, changes=changes)
     return ok(TaskOut.model_validate(task), message="已更新")
+
+
+@router.patch(
+    "/{task_id}/status",
+    response_model=Envelope[TaskOut],
+    summary="推进任务状态",
+    description=(
+        "按固定流转规则推进状态：\n\n"
+        "```\n"
+        "TODO ──▶ IN_PROGRESS ──▶ REVIEW ──▶ DONE（终态）\n"
+        "  │            │            │\n"
+        "  └────────────┴────────────┴──▶ CANCELLED（终态）\n"
+        "```\n"
+        "完整规则见 `core/constants.TASK_STATUS_TRANSITIONS`。"
+        "非法跳转返回 409（业务冲突），不是 422——请求格式没问题，是状态不允许。\n\n"
+        "**幂等**：目标状态与当前相同时直接返回，不报错。\n\n"
+        "为什么单独一个接口而不是塞进 `PATCH /tasks/{id}`：流转规则要集中校验，"
+        "混在通用 PATCH 里容易被「顺手支持改 status」绕过；"
+        "而且审计上要能区分「改了优先级」与「推进了状态」——"
+        "后者是需要单独通知与统计的业务事件。"
+    ),
+)
+async def change_task_status(
+    task_id: int,
+    payload: TaskStatusUpdateRequest,
+    session: AsyncSession = Depends(get_db),
+    _: int = Depends(get_current_tenant_id),
+) -> dict:
+    task = await task_service.change_status(session, task_id, target=payload.status)
+    return ok(TaskOut.model_validate(task), message="状态已更新")

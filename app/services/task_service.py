@@ -226,3 +226,29 @@ async def update_task(session: AsyncSession, task_id: int, *, changes: dict) -> 
 
     logger.info("task_updated", task_id=task_id, fields=sorted(changes))
     return task
+
+
+async def change_status(session: AsyncSession, task_id: int, *, target: TaskStatus) -> Task:
+    """推进任务状态（受 TASK_STATUS_TRANSITIONS 约束）。
+
+    ★ 状态流转单独成一个方法/接口，而不是塞进通用 `update_task`：
+      - 流转规则要集中校验，混在通用 PATCH 里会被「顺手也支持改 status」绕过
+      - 审计上要能区分「改了优先级」与「推进了状态」——后者通常是
+        需要单独通知与统计的业务事件（阶段 3 会在这里挂通知）
+      - 将来若要对「谁能推进状态」单独设权限，独立的接口才好加
+
+    `validate_status_transition` 允许「目标 == 当前」的幂等调用（直接返回），
+    并拒绝所有未在流转表里的跳转。
+    """
+    task = await TaskRepository(session).get_or_404(task_id)
+
+    validate_status_transition(task.status, str(target))
+
+    if task.status != str(target):
+        task.status = str(target)
+        await session.commit()
+        # 同 project/task 的 update：updated_at 是服务端生成的，UPDATE 后会过期
+        await session.refresh(task)
+        logger.info("task_status_changed", task_id=task_id, status=str(target))
+
+    return task

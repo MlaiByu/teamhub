@@ -367,13 +367,12 @@ async def test_task_cross_tenant_detail_returns_404(client):
 
 
 async def test_task_repository_direct_seed_is_isolated(db_session_factory):
-    """顺带确认仓储层：不同租户的任务在各自上下文下互不可见。"""
+    """顺带确认仓储层：无租户上下文时守卫拒绝。"""
     session = db_session_factory()
     previous = snapshot_context()
     try:
         set_context(RequestContext(tenant_id=1, data_scope=DataScope.ALL))
         repo = TaskRepository(session)
-        # 直接建会撞 project 外键，所以只断言「无上下文时守卫拒绝」
         set_context(RequestContext(tenant_id=None))
         from app.core.exceptions import TenantContextMissingError
 
@@ -382,3 +381,127 @@ async def test_task_repository_direct_seed_is_isolated(db_session_factory):
     finally:
         restore_context(previous)
         await session.close()
+
+
+# ----------------------------------------------------------------------
+# 状态流转（PATCH /tasks/{id}/status）
+# ----------------------------------------------------------------------
+async def _create_task_of(client, raw_token: str, title: str = "T") -> int:
+    """用**原始 token 字符串**建一个项目+任务，返回任务 id。
+
+    注意 `_make_project` 收的是 auth 头字典，所以这里统一 `_auth()` 一下——
+    之前把原始字符串直接当 headers 传，httpx 会去迭代字符串找键值对而报
+    `not enough values to unpack`。
+    """
+    pid = await _make_project(client, _auth(raw_token), code=f"SP-{title[:6]}")
+    resp = await client.post(
+        "/api/v1/tasks", json={"project_id": pid, "title": title}, headers=_auth(raw_token)
+    )
+    return resp.json()["data"]["id"]
+
+
+async def _set_status(client, *, token: str, task_id: int, target: str):
+    return await client.patch(
+        f"/api/v1/tasks/{task_id}/status", json={"status": target}, headers=_auth(token)
+    )
+
+
+async def test_valid_status_transitions_chain(client):
+    """合法链路：TODO → IN_PROGRESS → REVIEW → DONE 必须逐级可走。"""
+    data = await _register(client, "guotao")
+    token = data["token"]["access_token"]
+    tid = await _create_task_of(client, token, "流转链路")
+
+    for target in ["IN_PROGRESS", "REVIEW", "DONE"]:
+        resp = await _set_status(client, token=token, task_id=tid, target=target)
+        assert resp.status_code == 200, f"{target}: {resp.text}"
+        assert resp.json()["data"]["status"] == target
+
+
+async def test_status_can_fall_back_to_todo(client):
+    """IN_PROGRESS → TODO 是允许的（任务被打回）。"""
+    data = await _register(client, "guotao")
+    token = data["token"]["access_token"]
+    tid = await _create_task_of(client, token)
+    await _set_status(client, token=token, task_id=tid, target="IN_PROGRESS")
+
+    resp = await _set_status(client, token=token, task_id=tid, target="TODO")
+    assert resp.status_code == 200
+    assert resp.json()["data"]["status"] == "TODO"
+
+
+async def test_status_can_be_cancelled_from_active_states(client):
+    """TODO / IN_PROGRESS 都可以直接取消。"""
+    data = await _register(client, "guotao")
+    token = data["token"]["access_token"]
+
+    tid1 = await _create_task_of(client, token, "取消1")
+    r1 = await _set_status(client, token=token, task_id=tid1, target="CANCELLED")
+    assert r1.status_code == 200, r1.text
+
+    tid2 = await _create_task_of(client, token, "取消2")
+    await _set_status(client, token=token, task_id=tid2, target="IN_PROGRESS")
+    r2 = await _set_status(client, token=token, task_id=tid2, target="CANCELLED")
+    assert r2.status_code == 200, r2.text
+
+
+@pytest.mark.parametrize(
+    ("path", "blocked_target", "why"),
+    [
+        (["IN_PROGRESS", "REVIEW", "DONE"], "IN_PROGRESS", "DONE 是终态"),
+        (["CANCELLED"], "TODO", "CANCELLED 是终态"),
+        ([], "DONE", "不能从 TODO 直接跳到 DONE"),
+        ([], "REVIEW", "不能从 TODO 直接跳到 REVIEW"),
+        (["IN_PROGRESS"], "DONE", "不能从 IN_PROGRESS 直接跳到 DONE"),
+    ],
+)
+async def test_illegal_status_transitions_rejected(client, path, blocked_target, why):
+    """非法跳转返回 409（业务冲突），不是 422——请求格式没问题，是状态不允许。"""
+    data = await _register(client, "guotao")
+    token = data["token"]["access_token"]
+    tid = await _create_task_of(client, token, "非法流转")
+
+    for step in path:
+        r = await _set_status(client, token=token, task_id=tid, target=step)
+        assert r.status_code == 200, f"前置 {step} 应成功：{r.text}"
+
+    resp = await _set_status(client, token=token, task_id=tid, target=blocked_target)
+    assert resp.status_code == 409, f"{why}：应 409，实际 {resp.status_code}"
+    assert resp.json()["code"] == 40900
+
+
+async def test_status_transition_is_idempotent(client):
+    """目标状态与当前相同时直接返回，不报错。"""
+    data = await _register(client, "guotao")
+    token = data["token"]["access_token"]
+    tid = await _create_task_of(client, token)
+
+    resp = await _set_status(client, token=token, task_id=tid, target="TODO")
+    assert resp.status_code == 200
+    assert resp.json()["data"]["status"] == "TODO"
+
+
+async def test_status_rejects_unknown_value(client):
+    data = await _register(client, "guotao")
+    token = data["token"]["access_token"]
+    tid = await _create_task_of(client, token)
+
+    resp = await _set_status(client, token=token, task_id=tid, target="NOT_A_STATUS")
+    assert resp.status_code == 422
+
+
+async def test_status_requires_auth(client):
+    resp = await client.patch("/api/v1/tasks/1/status", json={"status": "IN_PROGRESS"})
+    assert resp.status_code == 401
+
+
+async def test_status_cross_tenant_returns_404(client):
+    alice = await _register(client, "alice")
+    bob = await _register(client, "bob")
+    alice_token = alice["token"]["access_token"]
+    tid = await _create_task_of(client, alice_token, "Alice 的任务")
+
+    resp = await _set_status(
+        client, token=bob["token"]["access_token"], task_id=tid, target="IN_PROGRESS"
+    )
+    assert resp.status_code == 404, "跨租户改状态必须 404"
