@@ -10,6 +10,7 @@ from fastapi import APIRouter
 
 from app.api.v1 import (
     attachments,
+    audit,
     auth,
     comments,
     departments,
@@ -26,6 +27,7 @@ from app.api.v1 import (
 api_v1_router = APIRouter()
 api_v1_router.include_router(system.router)
 api_v1_router.include_router(attachments.router)
+api_v1_router.include_router(audit.router)
 api_v1_router.include_router(auth.router)
 api_v1_router.include_router(tenants.router)
 api_v1_router.include_router(departments.router)
