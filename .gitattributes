@@ -1,0 +1,24 @@
+# 统一换行符：仓库内一律 LF，Windows 工作区也用 LF。
+#
+# 背景：2026-09-22 首次初始化时实测仓库里混着 20 个 CRLF 文件
+# （整个 alembic/ 目录、alembic.ini、script.py.mako 都是）和 76 个 LF 文件。
+# 混合行尾的代价：
+#   1. git diff 会出现「整文件改动」的假象，review 时看不到真实变更
+#   2. 跨平台协作（Windows 开发 + Linux 容器/CI）时同一文件反复来回转换
+#   3. 本地 ruff format --check 与 CI 结果可能不一致
+#
+# 本项目没有 .bat / .cmd 脚本（那些才需要 CRLF），所以不需要为任何文件保留 CRLF。
+* text=auto eol=lf
+
+# 二进制文件禁止行尾转换，否则内容会被损坏
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.xlsx binary
+*.docx binary
