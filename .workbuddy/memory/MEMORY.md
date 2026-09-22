@@ -113,7 +113,7 @@
 - 本地零依赖：SQLite 内存库 + `StaticPool`，**不需要** Postgres / Redis。
 - 隔离测试必须用**全新会话**（`db_session_factory()`），因为 `Session.get()`
   命中 identity map 时不发 SQL，会测到缓存而非过滤逻辑。
-- 覆盖率目标：核心 service ≥ 80%，整体 ≥ 70%（当前 90%）。
+- 覆盖率目标：核心 service ≥ 80%，整体 ≥ 70%（当前 92%）。
 
 ## 领域边界判断（架构）
 

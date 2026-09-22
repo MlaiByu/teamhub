@@ -253,7 +253,31 @@ pytest --cov=app --cov-report=term-missing
 | CI 雏形（lint → type → security test → test + coverage） | ✅ |
 | 本地零依赖降级模式 | ✅ SQLite + StaticPool |
 
-下一阶段目标（第 2 周）：用户 / 租户 / 认证 / RBAC 基础。
+## 第 2 周交付状态（用户 / 租户 / 认证 / RBAC 基础）
+
+| 能力 | 接口 |
+|---|---|
+| 认证：注册 / 登录 / 轮换 / 登出 | `POST /auth/{register,login,refresh,logout}` |
+| 当前身份 | `GET /auth/me` |
+| 租户：当前信息 / 切换 | `GET /tenants/current` · `POST /tenants/{id}/switch` |
+| 部门：树 / 创建 | `GET /departments` · `POST /departments` |
+| 成员：列表 / 加入 / 绑角色 | `GET /members` · `POST /members` · `POST /members/{id}/roles` |
+| 角色：列表 / 创建 | `GET /roles` · `POST /roles` |
+
+当前 **92 项测试全绿**（含 22 项安全测试），覆盖率 92%，ruff / mypy 干净。
+
+**关键设计决策**：
+
+- **注册 = 开一个团队**。`refresh_tokens` 是租户级表（`tenant_id` 非空），
+  只建用户会卡在「无租户 → 签不出 refresh token」的死局。
+  自助注册即开通个人团队 + 绑 `TENANT_ADMIN`；平台补开租户共用同一套角色装配。
+- **仓储按「表是否带 tenant_id」分两个基类**：全局表用 `BaseRepository`，
+  租户表用 `TenantAwareRepository`。登录发生在还没有租户上下文的时刻，
+  全局表套守卫会让登录永远失败。
+- **跨租户挂载拦截是「免费」的**：外键（部门上级、成员部门、角色）都走守卫查询，
+  别的租户的 ID 自然返回 None → 404，不需要逐处手写 `ensure_same_tenant`。
+
+下一阶段目标（第 3 周）：项目 / 任务 CRUD、状态流转（PROJECT-PLAN 十二）。
 
 ---
 
