@@ -1,0 +1,255 @@
+"""通知服务：事件的落库与投递。
+
+★ 这是「事件被处理」的唯一入口。每个事件类型最终都走到 `emit`：
+      emit → 按类型校验 payload → 落库 notifications → 推送 WebSocket
+
+★ 三条关于时序的硬约定，写在最前面，改这个模块前先读：
+
+  1. **必须在业务变更 commit 之后调用 `emit`。**
+     通知不是关键数据——它的写入失败绝不该让「任务已创建」这类操作回滚
+     或返回 500。所以 `emit` 用**独立事务**落库，且异常全部吞掉只留日志。
+
+  2. **推送必须在落库之后。**
+     反过来（先推后存）一旦落库失败，客户端就收到一条永远不会出现在
+     通知列表里的「幽灵通知」。先存后推最坏情况是「存了但没推到」——
+     用户下次拉列表仍能看到，是自愈的。
+
+  3. **调用 `emit` 时，业务变更应已提交。**
+     `emit` 会 `commit()`，如果调用方还留着未提交的变更，会被一并提交。
+     这是使用本模块唯一的注意事项。
+
+  为什么不把通知塞进业务事务（看似更「原子」）：那样业务成功但通知写不进去时，
+  整个业务操作要因为「通知失败」而失败——本末倒置。通知是可降级的旁路。
+
+  若要严格做到「不丢通知 + 不幽灵推送」，需要 outbox 模式（通知先落库，
+  再由 Celery 扫描投递）。本项目当前阶段不做，但 `emit` 的签名与调用位置
+  已经为它留好了位置。
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.db.context import current_tenant_id
+from app.core.logging import get_logger
+from app.realtime.events import EventType, NotificationEvent, render_title
+from app.realtime.manager import ConnectionManager, manager
+from app.repositories.notification import NotificationRepository
+from app.schemas.notification import NotificationOut
+
+logger = get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class MarkReadResult:
+    """标记已读的结果。
+
+    `found=False` 表示「不存在或不属于该用户」→ 调用方报 404；
+    `found=True, updated=0` 表示「本来就是已读」→ 幂等成功。
+    """
+
+    found: bool
+    updated: int
+
+
+async def emit(
+    session: AsyncSession,
+    *,
+    event_type: EventType | str,
+    target_user_id: int,
+    actor_id: int | None = None,
+    connection_manager: ConnectionManager | None = None,
+    **payload: Any,
+) -> NotificationEvent | None:
+    """落库一条通知并推送给目标用户。返回落库成功的事件；失败返回 None。
+
+    ★ 为什么失败返回 None 而不是抛异常：
+      `emit` 的调用点在业务操作**成功之后**。此时因为「通知没写进去」
+      而向上抛错，会让客户端以为业务操作失败了——实际上数据已经变了，
+      用户会重复提交。所以这里降级：记 ERROR 日志、返回 None，让业务照常返回成功。
+
+      注意 ERROR 级别的选择是有意的：静默降级会掩盖真实故障
+      （比如租户上下文丢失——那通常意味着调用点写错了），
+      所以要让它在日志里显眼，而不是 debug 掉。
+
+    ★ 租户来自 **contextvar**，不接参数：
+      单一来源，且强制调用方（含将来的 Celery 任务）先 `set_context`——
+      这正是 PROJECT-PLAN 风险 2「Celery 任务没有请求上下文」要求做的事。
+    """
+    tenant_id = current_tenant_id.get()
+    if tenant_id is None:
+        logger.error(
+            "notification_emit_without_tenant_context",
+            event_type=str(event_type),
+            target_user_id=target_user_id,
+            hint="emit 必须在已设租户上下文的场景调用；Celery 任务需在入口 set_context()",
+        )
+        return None
+
+    try:
+        # 校验 payload 并构造事件（类型未注册 / 字段不对会在这里抛）
+        event = NotificationEvent.create(
+            event_type=event_type,
+            tenant_id=tenant_id,
+            target_user_id=target_user_id,
+            actor_id=actor_id,
+            **payload,
+        )
+    except Exception:
+        # payload 不合规是**开发期错误**，但同样不能让业务接口 500
+        logger.exception(
+            "notification_payload_invalid",
+            event_type=str(event_type),
+            target_user_id=target_user_id,
+        )
+        return None
+
+    try:
+        repository = NotificationRepository(session)
+        repository.create(
+            user_id=event.target_user_id,
+            type=str(event.type),
+            payload=event.payload,
+            read_at=None,
+        )
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        logger.exception(
+            "notification_persist_failed",
+            event_type=str(event.type),
+            target_user_id=event.target_user_id,
+        )
+        return None
+
+    # 落库成功后才推送——顺序反了会产生「幽灵通知」
+    active_manager = connection_manager or manager
+    delivered = await active_manager.send_to_user(
+        tenant_id=event.tenant_id,
+        user_id=event.target_user_id,
+        message=event.to_message(),
+    )
+    logger.info(
+        "notification_emitted",
+        event_type=str(event.type),
+        tenant_id=event.tenant_id,
+        target_user_id=event.target_user_id,
+        connections=delivered,
+    )
+    return event
+
+
+async def emit_to_many(
+    session: AsyncSession,
+    *,
+    event_type: EventType | str,
+    target_user_ids: list[int],
+    actor_id: int | None = None,
+    connection_manager: ConnectionManager | None = None,
+    **payload: Any,
+) -> list[NotificationEvent]:
+    """给多个接收人各发一条通知（如评论里 @ 了多个人）。
+
+    ★ 去重是必须的：同一条评论里 `@张三 @张三` 不该产生两条通知；
+      在 API 层做去重意味着「客户端传什么就发什么」，所以在这里兜住。
+      另外**排除触发者自己**——@ 自己不该给自己发通知。
+    """
+    unique_targets = []
+    seen: set[int] = set()
+    for uid in target_user_ids:
+        if uid == actor_id or uid in seen:
+            continue
+        seen.add(uid)
+        unique_targets.append(uid)
+
+    events: list[NotificationEvent] = []
+    for uid in unique_targets:
+        event = await emit(
+            session,
+            event_type=event_type,
+            target_user_id=uid,
+            actor_id=actor_id,
+            connection_manager=connection_manager,
+            **payload,
+        )
+        if event is not None:
+            events.append(event)
+    return events
+
+
+# ----------------------------------------------------------------------
+# 通知查询（接口层用）
+# ----------------------------------------------------------------------
+def _to_out(row) -> NotificationOut:
+    """ORM 行 → 对外结构，顺带渲染标题。"""
+    return NotificationOut(
+        id=row.id,
+        event=row.type,
+        title=render_title(row.type, row.payload or {}),
+        payload=row.payload or {},
+        is_read=row.read_at is not None,
+        read_at=row.read_at,
+        created_at=row.created_at,
+    )
+
+
+async def list_notifications(
+    session: AsyncSession,
+    *,
+    user_id: int,
+    unread_only: bool,
+    page: int,
+    page_size: int,
+) -> tuple[list[NotificationOut], int]:
+    rows, total = await NotificationRepository(session).paginate_for_user(
+        user_id=user_id, unread_only=unread_only, page=page, page_size=page_size
+    )
+    return [_to_out(r) for r in rows], total
+
+
+async def count_unread(session: AsyncSession, *, user_id: int) -> int:
+    return await NotificationRepository(session).count_unread(user_id=user_id)
+
+
+async def mark_read(session: AsyncSession, *, user_id: int, notification_id: int) -> MarkReadResult:
+    """标记单条已读。
+
+    ★ 先查再改，而不是只看 UPDATE 的 rowcount：
+      rowcount=0 有两种含义——「不存在/不是你的」和「本来就是已读」。
+      前者该报 404，后者该幂等成功。只看 rowcount 会把「重复标记已读」
+      误报成 404，让前端的重试逻辑以为通知丢了。
+
+      查询本身带 `user_id` 条件，所以别人的通知会走到「不存在」分支 ——
+      统一 404，不区分「存在但归别人」，避免存在性泄露。
+    """
+    repository = NotificationRepository(session)
+    row = await repository.get_for_user(notification_id=notification_id, user_id=user_id)
+    if row is None:
+        return MarkReadResult(found=False, updated=0)
+
+    if row.read_at is not None:
+        return MarkReadResult(found=True, updated=0)
+
+    updated = await repository.mark_one_read(notification_id=notification_id, user_id=user_id)
+    await session.commit()
+    return MarkReadResult(found=True, updated=updated)
+
+
+async def mark_all_read(session: AsyncSession, *, user_id: int) -> int:
+    updated = await NotificationRepository(session).mark_all_read(user_id=user_id)
+    await session.commit()
+    return updated
+
+
+__all__ = [
+    "MarkReadResult",
+    "emit",
+    "emit_to_many",
+    "list_notifications",
+    "count_unread",
+    "mark_read",
+    "mark_all_read",
+]
