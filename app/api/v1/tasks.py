@@ -135,10 +135,11 @@ async def update_task(
     task_id: int,
     payload: TaskUpdateRequest,
     session: AsyncSession = Depends(get_db),
+    user_id: int = Depends(get_current_user_id),
     _: int = Depends(get_current_tenant_id),
 ) -> dict:
     changes = payload.model_dump(exclude_unset=True, mode="json")
-    task = await task_service.update_task(session, task_id, changes=changes)
+    task = await task_service.update_task(session, task_id, changes=changes, actor_id=user_id)
     return ok(TaskOut.model_validate(task), message="已更新")
 
 
@@ -166,7 +167,10 @@ async def change_task_status(
     task_id: int,
     payload: TaskStatusUpdateRequest,
     session: AsyncSession = Depends(get_db),
+    user_id: int = Depends(get_current_user_id),
     _: int = Depends(get_current_tenant_id),
 ) -> dict:
-    task = await task_service.change_status(session, task_id, target=payload.status)
+    task = await task_service.change_status(
+        session, task_id, target=payload.status, actor_id=user_id
+    )
     return ok(TaskOut.model_validate(task), message="状态已更新")

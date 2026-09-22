@@ -10,7 +10,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps.auth import get_current_tenant_id, require_roles
+from app.api.deps.auth import get_current_tenant_id, get_current_user_id, require_roles
 from app.core.constants import TENANT_ADMIN_ROLE
 from app.core.db.session import get_db
 from app.core.responses import Envelope, ok
@@ -52,10 +52,14 @@ async def list_members(
 async def add_member(
     payload: MemberAddRequest,
     session: AsyncSession = Depends(get_db),
+    actor_id: int = Depends(get_current_user_id),
     _: dict = Depends(require_roles(TENANT_ADMIN_ROLE)),
 ) -> dict:
     member = await member_service.add_member(
-        session, username=payload.username, dept_id=payload.dept_id
+        session,
+        username=payload.username,
+        dept_id=payload.dept_id,
+        actor_id=actor_id,
     )
     return ok(member, message="已加入")
 
@@ -76,10 +80,11 @@ async def assign_role(
     member_id: int,
     payload: AssignRoleRequest,
     session: AsyncSession = Depends(get_db),
+    actor_id: int = Depends(get_current_user_id),
     _: dict = Depends(require_roles(TENANT_ADMIN_ROLE)),
 ) -> dict:
     binding = await member_service.assign_role(
-        session, member_id=member_id, role_id=payload.role_id
+        session, member_id=member_id, role_id=payload.role_id, actor_id=actor_id
     )
     return ok(
         {"id": binding.id, "user_id": binding.user_id, "role_id": binding.role_id},

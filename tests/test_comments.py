@@ -146,19 +146,33 @@ async def _notes_of(db_session_factory, *, tenant_id: int, user_id: int) -> list
         await session.close()
 
 
-async def _clear_notes(db_session_factory, *, tenant_id: int, user_id: int) -> None:
-    """把已有通知标记已读，避免与前面的用例互相干扰。
+async def _reset_notes(db_session_factory, *, tenant_id: int, user_id: int) -> None:
+    """删掉该用户已有的通知，让用例从干净起点开始。
 
-    注意：这里不能直接删通知——列表只返回未读以外的全部，
-    所以用「按事件类型筛选」的方式在各用例里断言，而不是清空。
+    ★ 为什么必须「删」而不是「标记已读」：
+      第 4 周把全部触发点接上之后，**准备阶段本身就会产生通知**——
+      建任务时分配执行人 → TASK_ASSIGNED、把成员拉进团队 → MEMBER_JOINED。
+      而用例断言的是「本次操作产生了哪些通知」，所以历史必须先清掉。
+      标记已读不够：通知列表默认返回全部（含已读）。
+
+    ★ 删除时同时限定 tenant_id + user_id：DML 不经过 do_orm_execute 钩子，
+      不会自动加租户条件，必须显式写。
     """
+    from sqlalchemy import delete
+
+    from app.models import Notification
+
     session = db_session_factory()
     previous = snapshot_context()
     set_context(RequestContext(tenant_id=tenant_id, user_id=user_id, data_scope=DataScope.ALL))
     try:
-        from app.services import notification_service
-
-        await notification_service.mark_all_read(session, user_id=user_id)
+        await session.execute(
+            delete(Notification).where(
+                Notification.tenant_id == tenant_id,
+                Notification.user_id == user_id,
+            )
+        )
+        await session.commit()
     finally:
         restore_context(previous)
         await session.close()
@@ -207,7 +221,7 @@ async def test_comment_on_cross_tenant_task_returns_404(client):
 # ----------------------------------------------------------------------
 async def test_mention_creates_notification_for_mentioned_member(client, db_session_factory):
     admin_token, _mate, mate_uid, tenant_id, task_id, _a = await _setup_task_with_members(client)
-    await _clear_notes(db_session_factory, tenant_id=tenant_id, user_id=mate_uid)
+    await _reset_notes(db_session_factory, tenant_id=tenant_id, user_id=mate_uid)
 
     resp = await client.post(
         f"/api/v1/tasks/{task_id}/comments",
@@ -231,7 +245,7 @@ async def test_mention_suppresses_duplicate_comment_notification(client, db_sess
     一次操作两条通知是噪音，且两条内容几乎一样。
     """
     admin_token, _mate, mate_uid, tenant_id, task_id, _a = await _setup_task_with_members(client)
-    await _clear_notes(db_session_factory, tenant_id=tenant_id, user_id=mate_uid)
+    await _reset_notes(db_session_factory, tenant_id=tenant_id, user_id=mate_uid)
 
     await client.post(
         f"/api/v1/tasks/{task_id}/comments",
@@ -247,7 +261,7 @@ async def test_mention_suppresses_duplicate_comment_notification(client, db_sess
 async def test_comment_without_mention_notifies_assignee_once(client, db_session_factory):
     """没 @ 时，执行人正常收到一条「新评论」。"""
     admin_token, _mate, mate_uid, tenant_id, task_id, _a = await _setup_task_with_members(client)
-    await _clear_notes(db_session_factory, tenant_id=tenant_id, user_id=mate_uid)
+    await _reset_notes(db_session_factory, tenant_id=tenant_id, user_id=mate_uid)
 
     await client.post(
         f"/api/v1/tasks/{task_id}/comments", json={"content": "没有提及"}, headers=_h(admin_token)
@@ -276,7 +290,7 @@ async def test_comment_author_does_not_notify_self(client, db_session_factory):
         headers=_h(token),
     )
     tid = task.json()["data"]["id"]
-    await _clear_notes(db_session_factory, tenant_id=tenant_id, user_id=uid)
+    await _reset_notes(db_session_factory, tenant_id=tenant_id, user_id=uid)
 
     resp = await client.post(
         f"/api/v1/tasks/{tid}/comments",
@@ -297,7 +311,7 @@ async def test_mention_of_non_member_is_ignored(client, db_session_factory):
     admin_token, _mate, mate_uid, tenant_id, task_id, _a = await _setup_task_with_members(client)
     # 另一个租户里存在同名用户
     await _register(client, "other-user")
-    await _clear_notes(db_session_factory, tenant_id=tenant_id, user_id=mate_uid)
+    await _reset_notes(db_session_factory, tenant_id=tenant_id, user_id=mate_uid)
 
     resp = await client.post(
         f"/api/v1/tasks/{task_id}/comments",
@@ -313,7 +327,7 @@ async def test_mention_of_non_member_is_ignored(client, db_session_factory):
 async def test_mention_skips_disabled_member(client, db_session_factory):
     """被停用的成员不该收到提及通知。"""
     admin_token, _mate, mate_uid, tenant_id, task_id, _a = await _setup_task_with_members(client)
-    await _clear_notes(db_session_factory, tenant_id=tenant_id, user_id=mate_uid)
+    await _reset_notes(db_session_factory, tenant_id=tenant_id, user_id=mate_uid)
 
     # 把 mate 的成员关系停用
     session = db_session_factory()
@@ -360,7 +374,7 @@ async def test_mention_multiple_members_creates_one_each(client, db_session_fact
     task_id = task.json()["data"]["id"]
 
     for uid in uids:
-        await _clear_notes(db_session_factory, tenant_id=tenant_id, user_id=uid)
+        await _reset_notes(db_session_factory, tenant_id=tenant_id, user_id=uid)
 
     resp = await client.post(
         f"/api/v1/tasks/{task_id}/comments",

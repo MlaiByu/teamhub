@@ -33,9 +33,11 @@ from app.core.constants import (
 from app.core.exceptions import ConflictError, NotFoundError
 from app.core.logging import get_logger
 from app.models import Task, TenantMember
+from app.realtime.events import EventType
 from app.repositories.project import ProjectRepository
 from app.repositories.task import TaskRepository
 from app.repositories.tenant import TenantMemberRepository
+from app.services import notification_service
 
 logger = get_logger(__name__)
 
@@ -140,8 +142,10 @@ async def create_task(
     creator_dept_id: int | None,
 ) -> Task:
     """创建任务（要求已设租户上下文）。"""
-    # 项目走守卫查询：跨租户 / 超出数据范围都返回 None → 404
-    if await ProjectRepository(session).get(project_id) is None:
+    # 项目走守卫查询：跨租户 / 超出数据范围都返回 None → 404。
+    # 保留对象（而不是只判空）：通知 payload 需要项目名。
+    project = await ProjectRepository(session).get(project_id)
+    if project is None:
         raise NotFoundError("项目不存在或无权访问")
 
     assignee_member: TenantMember | None = None
@@ -164,9 +168,32 @@ async def create_task(
         dept_id=dept_id,
     )
     await session.flush()
+
+    # 先把通知要用的值取出来：emit 会 commit，且它内部可能 rollback
+    new_task_id = task.id
+    new_task_title = task.title
+    new_project_name = project.name
+
     await session.commit()
 
-    logger.info("task_created", task_id=task.id, project_id=project_id, assignee_id=assignee_id)
+    logger.info("task_created", task_id=new_task_id, project_id=project_id, assignee_id=assignee_id)
+
+    # ★ 事件必须在业务 commit 之后发（见 notification_service 的时序约定）。
+    #   排除「自己分配给自己」——那不该产生通知。
+    if assignee_id is not None and assignee_id != creator_id:
+        await notification_service.emit(
+            session,
+            event_type=EventType.TASK_ASSIGNED,
+            target_user_id=assignee_id,
+            actor_id=creator_id,
+            task_id=new_task_id,
+            task_title=new_task_title,
+            project_id=project_id,
+            project_name=new_project_name,
+            assigned_by=creator_id,
+            reassigned=False,
+        )
+
     return task
 
 
@@ -195,7 +222,9 @@ async def get_task(session: AsyncSession, task_id: int) -> Task:
     return await TaskRepository(session).get_or_404(task_id)
 
 
-async def update_task(session: AsyncSession, task_id: int, *, changes: dict) -> Task:
+async def update_task(
+    session: AsyncSession, task_id: int, *, changes: dict, actor_id: int | None = None
+) -> Task:
     """局部更新任务。
 
     `changes` 由路由用 `model_dump(exclude_unset=True, mode="json")` 产出。
@@ -203,6 +232,11 @@ async def update_task(session: AsyncSession, task_id: int, *, changes: dict) -> 
     否则改派之后任务的数据归属还挂在原负责人名下，列表可见性会跟着错。
     """
     task = await TaskRepository(session).get_or_404(task_id)
+
+    # 记下改派前的执行人：只有「真的换人了」才发通知。
+    # 不加这个比较的话，把 assignee_id 设成同一个值也会触发一次改派通知。
+    previous_assignee = task.assignee_id
+    project_id = task.project_id
 
     if "assignee_id" in changes:
         new_assignee = changes["assignee_id"]
@@ -218,6 +252,9 @@ async def update_task(session: AsyncSession, task_id: int, *, changes: dict) -> 
     for field, value in changes.items():
         setattr(task, field, value)
 
+    task_title = task.title
+    current_assignee = task.assignee_id
+
     await session.commit()
 
     # 理由同 project_service：`updated_at` 是服务端 onupdate 生成的，
@@ -225,10 +262,33 @@ async def update_task(session: AsyncSession, task_id: int, *, changes: dict) -> 
     await session.refresh(task)
 
     logger.info("task_updated", task_id=task_id, fields=sorted(changes))
+
+    # 改派事件：新执行人存在、确实换了人、且不是操作者本人给自己派活
+    if (
+        current_assignee is not None
+        and current_assignee != previous_assignee
+        and current_assignee != actor_id
+    ):
+        project = await ProjectRepository(session).get(project_id)
+        await notification_service.emit(
+            session,
+            event_type=EventType.TASK_ASSIGNED,
+            target_user_id=current_assignee,
+            actor_id=actor_id,
+            task_id=task_id,
+            task_title=task_title,
+            project_id=project_id,
+            project_name=project.name if project is not None else "",
+            assigned_by=actor_id,
+            reassigned=True,
+        )
+
     return task
 
 
-async def change_status(session: AsyncSession, task_id: int, *, target: TaskStatus) -> Task:
+async def change_status(
+    session: AsyncSession, task_id: int, *, target: TaskStatus, actor_id: int | None = None
+) -> Task:
     """推进任务状态（受 TASK_STATUS_TRANSITIONS 约束）。
 
     ★ 状态流转单独成一个方法/接口，而不是塞进通用 `update_task`：
@@ -244,11 +304,32 @@ async def change_status(session: AsyncSession, task_id: int, *, target: TaskStat
 
     validate_status_transition(task.status, str(target))
 
-    if task.status != str(target):
-        task.status = str(target)
-        await session.commit()
-        # 同 project/task 的 update：updated_at 是服务端生成的，UPDATE 后会过期
-        await session.refresh(task)
-        logger.info("task_status_changed", task_id=task_id, status=str(target))
+    if task.status == str(target):
+        # 幂等：状态没变就不提交、也不发通知——没有变化就没有事件
+        return task
+
+    from_status = task.status
+    assignee_id = task.assignee_id
+    task_title = task.title
+
+    task.status = str(target)
+    await session.commit()
+    # 同 project/task 的 update：updated_at 是服务端生成的，UPDATE 后会过期
+    await session.refresh(task)
+    logger.info("task_status_changed", task_id=task_id, status=str(target))
+
+    # 通知执行人，但**排除操作者本人**——自己推进自己的任务不该收到通知
+    if assignee_id is not None and assignee_id != actor_id:
+        await notification_service.emit(
+            session,
+            event_type=EventType.TASK_STATUS_CHANGED,
+            target_user_id=assignee_id,
+            actor_id=actor_id,
+            task_id=task_id,
+            task_title=task_title,
+            from_status=from_status,
+            to_status=str(target),
+            changed_by=actor_id,
+        )
 
     return task

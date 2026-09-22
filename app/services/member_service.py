@@ -12,11 +12,13 @@ from app.core.db.context import current_tenant_id
 from app.core.exceptions import ConflictError, NotFoundError
 from app.core.logging import get_logger
 from app.models import UserRole
+from app.realtime.events import EventType
 from app.repositories.org import DepartmentRepository
 from app.repositories.rbac import RoleRepository, UserRoleRepository
 from app.repositories.tenant import TenantMemberRepository, TenantRepository
 from app.repositories.user import UserRepository
 from app.schemas.tenant import MemberOut
+from app.services import notification_service
 
 logger = get_logger(__name__)
 
@@ -40,7 +42,13 @@ async def list_members(session: AsyncSession, *, dept_id: int | None = None) -> 
     return [_to_out(member, user) for member, user in rows]
 
 
-async def add_member(session: AsyncSession, *, username: str, dept_id: int | None) -> MemberOut:
+async def add_member(
+    session: AsyncSession,
+    *,
+    username: str,
+    dept_id: int | None,
+    actor_id: int | None = None,
+) -> MemberOut:
     """把已注册的用户加入当前租户。
 
     校验顺序故意从「便宜」到「贵」：先查部门、再查用户、最后才算配额。
@@ -77,13 +85,36 @@ async def add_member(session: AsyncSession, *, username: str, dept_id: int | Non
         dept_id=dept_id,
     )
     await session.flush()
+
+    added_user_id = user.id
+    tenant_name = tenant.name if tenant is not None else ""
+
     await session.commit()
 
-    logger.info("member_added", user_id=user.id, tenant_id=tenant_id)
+    logger.info("member_added", user_id=added_user_id, tenant_id=tenant_id)
+
+    # ★ 通知被加入的人。注意此刻他**还没有任何角色**（角色要另行绑定），
+    #   所以 role_codes 传空列表——不要为了「通知好看」去猜一个角色名。
+    #   emit 的成员守卫要求目标是本租户 ACTIVE 成员，而这一步刚好满足。
+    await notification_service.emit(
+        session,
+        event_type=EventType.MEMBER_JOINED,
+        target_user_id=added_user_id,
+        actor_id=actor_id,
+        tenant_name=tenant_name,
+        role_codes=[],
+    )
+
     return _to_out(member, user)
 
 
-async def assign_role(session: AsyncSession, *, member_id: int, role_id: int) -> UserRole:
+async def assign_role(
+    session: AsyncSession,
+    *,
+    member_id: int,
+    role_id: int,
+    actor_id: int | None = None,
+) -> UserRole:
     """给成员绑定角色（当前租户内）。
 
     ★ 两个 id 都走守卫：member_id 与 role_id 属于别的租户时，get() 都会
@@ -103,10 +134,34 @@ async def assign_role(session: AsyncSession, *, member_id: int, role_id: int) ->
     if existing is not None:
         # 幂等：重复绑定同一角色返回现有绑定，而不是撞 UNIQUE 约束报错。
         # 对管理员来说「已经绑过了」是正常状态，不是错误。
+        #
+        # ★ 这里**不发通知**：没有发生变化就没有事件。否则管理员手滑点两次
+        #   「保存」，用户会收到两条一模一样的「你被授予了角色」。
         return existing
 
     binding = await repo.bind(user_id=member.user_id, role_id=role_id)
+    await session.flush()
+
+    target_user_id = member.user_id
+    role_code = role.code
+    role_name = role.name
+    data_scope = role.data_scope
+
     await session.commit()
 
-    logger.info("role_assigned", user_id=member.user_id, role_id=role_id, member_id=member_id)
+    logger.info("role_assigned", user_id=target_user_id, role_id=role_id, member_id=member_id)
+
+    # 排除操作者给自己授权——自己给自己绑角色不必通知自己
+    if target_user_id != actor_id:
+        await notification_service.emit(
+            session,
+            event_type=EventType.ROLE_ASSIGNED,
+            target_user_id=target_user_id,
+            actor_id=actor_id,
+            role_id=role_id,
+            role_code=role_code,
+            role_name=role_name,
+            data_scope=data_scope,
+        )
+
     return binding

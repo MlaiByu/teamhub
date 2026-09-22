@@ -330,6 +330,31 @@ def _h(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
 
 
+async def _reset_notes(db_session_factory, *, tenant_id: int, user_id: int) -> None:
+    """删掉该用户已有的通知——准备阶段的动作本身也会产生通知（如 MEMBER_JOINED）。
+
+    DML 不经过 do_orm_execute 钩子，所以 tenant_id 必须显式写。
+    """
+    from sqlalchemy import delete
+
+    from app.models import Notification
+
+    session = db_session_factory()
+    previous = snapshot_context()
+    set_context(RequestContext(tenant_id=tenant_id, user_id=user_id, data_scope=DataScope.ALL))
+    try:
+        await session.execute(
+            delete(Notification).where(
+                Notification.tenant_id == tenant_id,
+                Notification.user_id == user_id,
+            )
+        )
+        await session.commit()
+    finally:
+        restore_context(previous)
+        await session.close()
+
+
 async def _seed_note(
     db_session_factory, *, tenant_id: int, user_id: int, name: str = "Acme"
 ) -> None:
@@ -444,7 +469,8 @@ async def test_notification_visible_only_to_own_user(client, db_session_factory)
     )
     mate_uid = added.json()["data"]["user_id"]
 
-    # 给同事发一条通知
+    # 先把「加入团队」产生的通知清掉，让本用例只观察下面这一条
+    await _reset_notes(db_session_factory, tenant_id=tenant_id, user_id=mate_uid)
     await _seed_note(db_session_factory, tenant_id=tenant_id, user_id=mate_uid, name="同事的团队")
 
     # 管理员看不到同事的通知
