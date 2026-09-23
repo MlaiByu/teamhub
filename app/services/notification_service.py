@@ -33,6 +33,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import cache
 from app.core.constants import MemberStatus
 from app.core.db.context import current_tenant_id
 from app.core.logging import get_logger
@@ -170,6 +171,10 @@ async def emit(
         target_user_id=event.target_user_id,
         connections=delivered,
     )
+
+    # 失效该用户的未读计数缓存（下面「读时缓存」的配套写时失效）
+    await invalidate_unread_cache(tenant_id=event.tenant_id, user_id=event.target_user_id)
+
     return event
 
 
@@ -241,8 +246,46 @@ async def list_notifications(
     return [_to_out(r) for r in rows], total
 
 
+UNREAD_CACHE_TTL = 30
+
+
+async def invalidate_unread_cache(*, tenant_id: int, user_id: int) -> None:
+    """失效某用户的未读计数缓存。
+
+    ★ 所有会改变未读数的路径都必须调它，否则角标会显示旧值：
+      新通知落库（`emit` / `emit_to_many`）、标记单条已读、全部已读。
+      TTL 只是兜底（防止漏失效时永久错），不是主要机制。
+    """
+    await cache.cache_delete(tenant_id, "notifications", "unread", user_id)
+
+
 async def count_unread(session: AsyncSession, *, user_id: int) -> int:
-    return await NotificationRepository(session).count_unread(user_id=user_id)
+    """当前租户内该用户的未读数（带缓存）。
+
+    ★ 为什么给它加缓存：这是前端角标的轮询接口——打开着页面就会
+      持续请求，是真正的热点读。而它后面是一次 COUNT 查询（全表扫该用户的通知），
+      在通知量大的租户里不便宜。
+
+    ★ 一致性策略：**读时缓存 + 写时失效**。TTL 取 30s 只是兜底；
+      真正的正确性靠上面所有写路径主动 `invalidate`（含 WebSocket 推送之前），
+      所以用户看到角标变化的延迟是「一次缓存删除」而不是 30 秒。
+    """
+    tenant_id = current_tenant_id.get()
+    if tenant_id is None:
+        # 无租户上下文：不做缓存（缓存 key 需要租户前缀，无租户无从构造）
+        return await NotificationRepository(session).count_unread(user_id=user_id)
+
+    async def factory() -> int:
+        return await NotificationRepository(session).count_unread(user_id=user_id)
+
+    return await cache.cache_get_or_set(
+        tenant_id,
+        "notifications",
+        "unread",
+        user_id,
+        factory=factory,
+        ttl=UNREAD_CACHE_TTL,
+    )
 
 
 async def mark_read(session: AsyncSession, *, user_id: int, notification_id: int) -> MarkReadResult:
@@ -266,12 +309,23 @@ async def mark_read(session: AsyncSession, *, user_id: int, notification_id: int
 
     updated = await repository.mark_one_read(notification_id=notification_id, user_id=user_id)
     await session.commit()
+
+    if updated:
+        tenant_id = current_tenant_id.get()
+        if tenant_id is not None:
+            await invalidate_unread_cache(tenant_id=tenant_id, user_id=user_id)
+
     return MarkReadResult(found=True, updated=updated)
 
 
 async def mark_all_read(session: AsyncSession, *, user_id: int) -> int:
     updated = await NotificationRepository(session).mark_all_read(user_id=user_id)
     await session.commit()
+
+    tenant_id = current_tenant_id.get()
+    if tenant_id is not None:
+        await invalidate_unread_cache(tenant_id=tenant_id, user_id=user_id)
+
     return updated
 
 
@@ -281,6 +335,7 @@ __all__ = [
     "emit_to_many",
     "list_notifications",
     "count_unread",
+    "invalidate_unread_cache",
     "mark_read",
     "mark_all_read",
 ]
