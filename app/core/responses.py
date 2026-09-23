@@ -62,3 +62,24 @@ def paged(items: list, total: int, page: int, page_size: int) -> dict:
         },
         "request_id": request_id_var.get(),
     }
+
+
+def fail(code: int, message: str, data=None) -> dict:
+    """构造失败信封。
+
+    ★ 为什么需要它（而不是让中间件抛异常交给全局 handler）：
+
+      FastAPI 的 `exception_handler` 由 `ExceptionMiddleware` 执行，
+      而它位于中间件栈的**内层**。中间件在 `call_next` 之前抛出的异常
+      根本到不了那里——会直接冒泡，最终变成 500（或由 ServerErrorMiddleware
+      兜底成纯文本），**信封格式与业务码全丢**。
+
+      所以「在中间件里拒绝请求」必须自己构造响应体。这里与
+      `exceptions._envelope()` 共用同一套信封形状，避免两处漂移。
+    """
+    return {
+        "code": code,
+        "message": message,
+        "data": data,
+        "request_id": request_id_var.get(),
+    }

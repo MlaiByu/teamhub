@@ -12,7 +12,8 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.core.constants import BizCode
-from app.core.logging import get_logger, request_id_var
+from app.core.logging import get_logger
+from app.core.responses import fail
 
 logger = get_logger(__name__)
 
@@ -79,7 +80,8 @@ class TenantContextMissingError(RuntimeError):
 
 
 def _envelope(code: int, message: str, data=None) -> dict:
-    return {"code": code, "message": message, "data": data, "request_id": request_id_var.get()}
+    """与中间件共用同一套信封形状（见 responses.fail 的说明）。"""
+    return fail(code, message, data)
 
 
 def register_exception_handlers(app: FastAPI) -> None:

@@ -35,12 +35,20 @@ from app.core.constants import DataScope  # noqa: E402
 from app.core.db.base import Base  # noqa: E402
 from app.core.db.context import RequestContext, reset_context, set_context  # noqa: E402
 from app.core.db.session import SessionLocal, engine  # noqa: E402
+from app.core.redis import reset_client_for_tests  # noqa: E402
 from app.main import app as fastapi_app  # noqa: E402
 
 
 @pytest_asyncio.fixture(scope="function")
 async def _schema() -> AsyncGenerator[None, None]:
-    """每用例一套干净的表结构。"""
+    """每用例一套干净的表结构与干净的 Redis。
+
+    ★ Redis 也要重置（fakeredis 是**进程内单例**）：
+      限流按 `(租户, 时间窗口)` 计数，若上个用例的计数残留，
+      下个用例可能在没发几次请求时就撞上限流（600/分钟）——
+      表现为「单独跑绿、一起跑红」，且报错与业务无关，非常难查。
+    """
+    reset_client_for_tests()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
