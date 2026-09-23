@@ -28,7 +28,13 @@ services:
 
   api:
     build: .
-    env_file: .env
+    # ★ .env 不在仓库里（.gitignore 正确排除了它），所以必须声明 required: false——
+    #   否则 clone 下来 `docker compose up` 会因「找不到 .env」直接失败。
+    #   需要自定义配置时 `cp .env.example .env` 即自动生效。
+    #   （`required` 字段需 Compose Spec v2.24+，Docker Desktop 自带版本满足。）
+    env_file:
+      - path: .env
+        required: false
     environment:
       DATABASE_URL: postgresql://teamhub:teamhub@postgres:5432/teamhub
       REDIS_URL: redis://redis:6379/0
@@ -58,7 +64,13 @@ services:
 
   worker:
     build: .
-    env_file: .env
+    # ★ .env 不在仓库里（.gitignore 正确排除了它），所以必须声明 required: false——
+    #   否则 clone 下来 `docker compose up` 会因「找不到 .env」直接失败。
+    #   需要自定义配置时 `cp .env.example .env` 即自动生效。
+    #   （`required` 字段需 Compose Spec v2.24+，Docker Desktop 自带版本满足。）
+    env_file:
+      - path: .env
+        required: false
     environment:
       DATABASE_URL: postgresql://teamhub:teamhub@postgres:5432/teamhub
       REDIS_URL: redis://redis:6379/0
@@ -74,7 +86,13 @@ services:
 
   beat:
     build: .
-    env_file: .env
+    # ★ .env 不在仓库里（.gitignore 正确排除了它），所以必须声明 required: false——
+    #   否则 clone 下来 `docker compose up` 会因「找不到 .env」直接失败。
+    #   需要自定义配置时 `cp .env.example .env` 即自动生效。
+    #   （`required` 字段需 Compose Spec v2.24+，Docker Desktop 自带版本满足。）
+    env_file:
+      - path: .env
+        required: false
     environment:
       DATABASE_URL: postgresql://teamhub:teamhub@postgres:5432/teamhub
       REDIS_URL: redis://redis:6379/0
