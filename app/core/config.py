@@ -53,6 +53,10 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 30
     refresh_token_expire_days: int = 14
+    # 过期 refresh token 的保留天数（定期清理任务的缓冲期）。
+    # 留缓冲是为了容忍各节点时钟偏差，避免刚过期的行被删后
+    # 仍有飞行中的请求来查它。
+    refresh_token_retention_days: int = 7
 
     # --- 限流（按租户配额，阶段 3 起生效）---
     rate_limit_per_minute: int = 600
@@ -61,6 +65,21 @@ class Settings(BaseSettings):
     celery_broker_url: str = "redis://127.0.0.1:6379/1"
     # 本地/测试：task_always_eager=True，无需真实 broker（11.2）
     celery_always_eager: bool = True
+    # 结果后端。`cache+memory://` 是 Celery 内置的内存后端，零依赖——
+    # 本地与 eager 模式下结果就在进程内，用不到外部存储。
+    # 生产换 redis：CELERY_RESULT_BACKEND=redis://redis:6379/2
+    celery_result_backend: str = "cache+memory://"
+
+    # --- 邮件 ---
+    # console：把邮件内容写进日志（本地/测试的零依赖默认）
+    # smtp：真实投递
+    mail_backend: Literal["console", "smtp"] = "console"
+    mail_from: str = "noreply@teamhub.local"
+    smtp_host: str = "localhost"
+    smtp_port: int = 587
+    smtp_user: str | None = None
+    smtp_password: str | None = None
+    smtp_use_tls: bool = True
 
     # --- 附件存储 ---
     # 本地模式文件落在项目根下的 local_storage/（已被 .gitignore 忽略）。

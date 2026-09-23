@@ -10,9 +10,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import UTC, datetime
-from typing import Any, cast
 
-from sqlalchemy import CursorResult, Select, func, select, update
+from sqlalchemy import Select, func, select
 
 from app.models import Notification
 from app.repositories.base import TenantAwareRepository
@@ -72,34 +71,27 @@ class NotificationRepository(TenantAwareRepository[Notification]):
         ★ 必须带 `user_id` 条件：否则「知道别人的通知 id 就能把它标成已读」
           ——虽然读不到内容，但能篡改别人的未读状态（同样是越权）。
           带 user_id 后，别人的 id 受影响行数为 0，调用方据此返回 404。
+
+        ★ 走 `bulk_update()`：钩子**不作用于**批量写（实测确认）。
+          修复前这里没有租户条件，会把该 user_id 在**其他租户**的通知
+          一并标为已读——用户在 A 公司点「已读」，B 公司的未读被静默清掉。
         """
-        stmt = (
-            update(Notification)
-            .where(
-                Notification.id == notification_id,
-                Notification.user_id == user_id,
-                Notification.read_at.is_(None),
-                Notification.is_deleted.is_(False),
-            )
-            .values(read_at=datetime.now(UTC), updated_at=datetime.now(UTC))
+        return await self.bulk_update(
+            {"read_at": datetime.now(UTC)},
+            Notification.id == notification_id,
+            Notification.user_id == user_id,
+            Notification.read_at.is_(None),
+            Notification.is_deleted.is_(False),
         )
-        # session.execute(update(...)) 运行期返回 CursorResult（带 rowcount），
-        # 但静态类型标注是 Result[Any]——cast 反映运行期事实。
-        result = cast("CursorResult[Any]", await self.session.execute(stmt))
-        return int(result.rowcount or 0)
 
     async def mark_all_read(self, *, user_id: int) -> int:
-        """把当前租户内该用户的全部未读标记为已读，返回条数。"""
-        stmt = (
-            update(Notification)
-            .where(
-                Notification.user_id == user_id,
-                Notification.read_at.is_(None),
-                Notification.is_deleted.is_(False),
-            )
-            .values(read_at=datetime.now(UTC), updated_at=datetime.now(UTC))
+        """把当前租户内该用户的全部未读标记为已读，返回条数。
+
+        ★ 走 `bulk_update()`：理由同 `mark_one_read`。
+        """
+        return await self.bulk_update(
+            {"read_at": datetime.now(UTC)},
+            Notification.user_id == user_id,
+            Notification.read_at.is_(None),
+            Notification.is_deleted.is_(False),
         )
-        # session.execute(update(...)) 运行期返回 CursorResult（带 rowcount），
-        # 但静态类型标注是 Result[Any]——cast 反映运行期事实。
-        result = cast("CursorResult[Any]", await self.session.execute(stmt))
-        return int(result.rowcount or 0)

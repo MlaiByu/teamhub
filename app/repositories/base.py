@@ -29,7 +29,7 @@ from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from typing import Any, cast
 
-from sqlalchemy import CursorResult, Select, func, select, update
+from sqlalchemy import CursorResult, Select, delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db.base import Base
@@ -206,6 +206,50 @@ class TenantAwareRepository[ModelT: Base](BaseRepository[ModelT]):
         """带上下文校验的查询起点（覆盖基类的无守卫版本）。"""
         self.require_tenant_context()
         return self.raw_select()
+
+    # ------------------------------------------------------------------
+    # 批量写（★ 必须走这里，不要直接写 update()/delete()）
+    # ------------------------------------------------------------------
+    def _tenant_condition(self) -> Any:
+        """批量写用的租户条件。
+
+        bypass 模式下 `require_tenant_context()` 返回 0，于是条件是
+        `tenant_id == 0`——匹配不到任何行。这是**刻意的安全失败**：
+        批量跨租户写必须走 `bypass_update`（会写审计），
+        绝不能靠"钩子会过滤"来兜底（它根本不管批量写，见下）。
+        """
+        # 泛型基类里 `self.model` 是 `type[ModelT]`，而 ModelT 的约束是 Base
+        # （不含 tenant_id）——静态类型推断不出这个属性，运行时完全合法
+        # （只有 TenantAwareRepository 的子类才会有 tenant_id 列）。
+        return self.model.tenant_id == self.require_tenant_context()  # type: ignore[attr-defined]
+
+    async def bulk_update(self, values: dict[str, Any], *conditions: Any) -> int:
+        """带租户隔离的批量更新，返回受影响行数。
+
+        ★★ 为什么必须用这个方法，而不是直接 `update(Model).where(...)`：
+
+          `do_orm_execute` 钩子注入的 `with_loader_criteria` **只作用于
+          实体加载（SELECT）**，对 bulk UPDATE / DELETE **完全不生效**。
+
+          这是**实测确认**的（不是推测）：在租户 1 的上下文里执行一条
+          不带租户条件的 `DELETE`，两个租户的行一起被删掉了。
+
+          结论：「业务代码不手写 tenant_id，钩子会注入」这条约定
+          **只对查询成立**。批量写必须显式带租户条件——所以把它固化进
+          这个封装，调用方**没有机会漏写**。
+
+          建议在代码评审里以此为判据：`repositories/` 下出现裸的
+          `update(` / `delete(` 且不带 tenant_id 条件，就是 bug。
+        """
+        stmt = update(self.model).where(self._tenant_condition(), *conditions).values(**values)
+        result = cast("CursorResult[Any]", await self.session.execute(stmt))
+        return int(result.rowcount or 0)
+
+    async def bulk_delete(self, *conditions: Any) -> int:
+        """带租户隔离的批量删除，返回受影响行数。理由同 `bulk_update`。"""
+        stmt = delete(self.model).where(self._tenant_condition(), *conditions)
+        result = cast("CursorResult[Any]", await self.session.execute(stmt))
+        return int(result.rowcount or 0)
 
     # ------------------------------------------------------------------
     # 写入
