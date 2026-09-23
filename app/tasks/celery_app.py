@@ -40,6 +40,8 @@ celery_app = Celery(
     #   显式列出除了正确，还顺带让「本服务有哪些任务」在入口处一目了然。
     include=[
         "app.tasks.maintenance",
+        "app.tasks.email",
+        "app.tasks.audit",
     ],
 )
 

@@ -19,6 +19,7 @@ from app.repositories.tenant import TenantMemberRepository, TenantRepository
 from app.repositories.user import UserRepository
 from app.schemas.tenant import MemberOut
 from app.services import audit_service, notification_service
+from app.tasks.email import send_email
 
 logger = get_logger(__name__)
 
@@ -112,6 +113,22 @@ async def add_member(
         tenant_name=tenant_name,
         role_codes=[],
     )
+
+    # 站内通知之外再发一封邮件（异步，不阻塞本次请求）。
+    # 用户的 email 是可选的（注册时没强制填），没填就跳过——
+    # 不为了「发出去」而去猜一个地址。
+    if user.email:
+        send_email.delay(
+            to=user.email,
+            subject=f"你已加入团队「{tenant_name}」",
+            body=(
+                f"你好 {username}：\n\n"
+                f"你已被加入团队「{tenant_name}」。\n"
+                f"登录后即可查看团队内的项目与任务。\n\n"
+                f"—— TeamHub"
+            ),
+            tenant_id=tenant_id,
+        )
 
     return _to_out(member, user)
 

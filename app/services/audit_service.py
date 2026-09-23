@@ -76,4 +76,54 @@ async def record(
         logger.exception("audit_write_failed", action=action, entity_type=entity_type)
 
 
-__all__ = ["record"]
+__all__ = ["record", "record_deferred"]
+
+
+def record_deferred(
+    *,
+    action: str,
+    entity_type: str,
+    entity_id: int | None = None,
+    detail: dict[str, Any] | None = None,
+    user_id: int | None = None,
+    ip: str | None = None,
+) -> None:
+    """把审计交给 Celery **异步**落库（注意：**可能丢**）。
+
+    ★ 与 `record()` 的取舍（这是本函数存在的唯一理由，用之前先读）：
+
+      `record()`：同步落库，**可靠**。审计的价值就在于此，所以它是默认。
+      `record_deferred()`：异步落库，不阻塞调用方，但 worker 故障 / 队列积压 /
+        进程被杀时，这条审计就没了。
+
+      所以只用它做「量大且可容忍丢失」的记录（高频读取埋点、用量统计）。
+      **业务写操作一律用 `record()`。**
+
+    ★ 为什么是普通函数而不是 `async def`：
+      它只做「投递到队列」，没有需要 await 的 IO。
+
+    ★ eager 模式（本地开发）下 `.delay()` 会**同步执行**，
+      所以本地看到的仍然是「立刻落库」——方便调试，但别因此以为生产也是同步。
+    """
+    tenant_id = current_tenant_id.get()
+    if tenant_id is None:
+        # 没有租户上下文就不投递：审计行的 tenant_id 是隔离关键，
+        # 无主的记录写了也查不到。与 record() 的处理保持一致。
+        logger.warning("audit_deferred_skipped_no_tenant_context", action=action)
+        return
+
+    # 函数内 import：避免 services 模块在导入期就把 Celery 实例拉起来
+    # （测试里只想用 services 时没必要初始化消息队列客户端）。
+    from app.tasks.audit import persist_audit_log
+
+    persist_audit_log.delay(
+        tenant_id=tenant_id,
+        payload={
+            "user_id": user_id if user_id is not None else current_user_id.get(),
+            "action": action,
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "detail": detail or {},
+            "ip": ip if ip is not None else current_client_ip.get(),
+        },
+    )
