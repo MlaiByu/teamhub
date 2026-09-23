@@ -20,6 +20,7 @@ from app.core.config import settings
 from app.core.db.session import engine
 from app.core.exceptions import register_exception_handlers
 from app.core.logging import configure_logging, get_logger
+from app.core.redis import close_redis, init_redis
 from app.middleware import (
     RateLimitMiddleware,
     RequestIDMiddleware,
@@ -78,9 +79,13 @@ async def _bootstrap_local_schema() -> None:
 async def lifespan(app: FastAPI):
     logger.info("app_startup", env=settings.app_env, db=settings.database_url.split("://")[0])
     await _bootstrap_local_schema()
-    yield
-    await engine.dispose()
-    logger.info("app_shutdown")
+    await init_redis()
+    try:
+        yield
+    finally:
+        await close_redis()
+        await engine.dispose()
+        logger.info("app_shutdown")
 
 
 def create_app() -> FastAPI:
