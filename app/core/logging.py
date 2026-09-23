@@ -6,9 +6,9 @@ import logging
 import sys
 import uuid
 from contextvars import ContextVar
-from typing import Any
 
 import structlog
+from structlog.typing import EventDict, WrappedLogger
 
 # 请求 ID 存 contextvar，日志 processor 自动带上。
 request_id_var: ContextVar[str | None] = ContextVar("request_id", default=None)
@@ -18,7 +18,7 @@ def new_request_id() -> str:
     return uuid.uuid4().hex[:16]
 
 
-def _add_request_id(_logger, _method, event_dict: dict[str, Any]) -> dict[str, Any]:
+def _add_request_id(_logger: WrappedLogger, _method: str, event_dict: EventDict) -> EventDict:
     rid = request_id_var.get()
     if rid:
         event_dict["request_id"] = rid

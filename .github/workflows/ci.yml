@@ -44,7 +44,8 @@ jobs:
 
       - name: Type check (mypy)
         run: mypy app
-        continue-on-error: true   # 第 1 周先不阻断，阶段 4 转硬失败
+        # 阶段 4 承诺：mypy 转硬失败。此前 4 个遗留错误已清零，
+        # 现在 mypy 全绿，失败即阻断——不再用 continue-on-error 掩盖类型错误。
 
       # ★ 安全测试单独跑一步，且失败即阻断
       # 隔离与越权测试是项目第一优先，不该和业务测试混在一起被忽略

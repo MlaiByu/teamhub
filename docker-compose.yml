@@ -35,7 +35,19 @@ services:
       CELERY_BROKER_URL: redis://redis:6379/1
       USE_FAKEREDIS: "false"
       CELERY_ALWAYS_EAGER: "false"
-      APP_ENV: local
+      # ★ 必须是 prod（不是 local）：local 会触发 _bootstrap_local_schema 里
+      #   「SQLite 内存库」分支的判定条件之一，虽然这里的 DATABASE_URL 是
+      #   PostgreSQL、不会被 create_all 误伤，但 local 还意味着 debug=True、
+      #   JSON 日志关闭、生产密钥守卫（_guard_production_secrets）不生效——
+      #   后者最危险：APP_ENV=local 时可以用默认占位 JWT_SECRET 起线上服务，
+      #   等于签名形同虚设。compose 是「别人 clone 下来一键起」的部署形态，
+      #   必须按生产对待。
+      APP_ENV: prod
+      # ★ 生产密钥必须覆盖：openssl rand -hex 32 生成，或放 .env 里
+      #   JWT_SECRET=... （APP_ENV=prod 下用占位值会拒绝启动，这是有意的）。
+      #   用 ${JWT_SECRET:?err} 形式：未设置时 compose 直接报错并拒绝启动，
+      #   而不是带着占位密钥悄悄上线。
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env, see README}
     ports: ["8000:8000"]
     depends_on:
       postgres: {condition: service_healthy}

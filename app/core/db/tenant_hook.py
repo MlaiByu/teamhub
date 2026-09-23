@@ -75,7 +75,11 @@ def _build_criteria_map() -> dict[type, Callable[[type], Any]]:
         return criteria
 
     if tenant_id is not None:
-        criteria[TenantScopedMixin] = lambda cls: cls.tenant_id == tenant_id
+        # ★ 这些字段由 Mixin 的 declared_attr 在实体类上生成；静态类型里 `cls`
+        #   是裸 `type`、没有 `.tenant_id`。运行时完全合法（SQLAlchemy 会把实体类
+        #   交进来求值），所以对 mypy 的 attr-defined 报错精确 ignore。
+        #   不能用 getattr(cls, "tenant_id") 替代——ruff B009 会把它「修」回属性访问。
+        criteria[TenantScopedMixin] = lambda cls: cls.tenant_id == tenant_id  # type: ignore[attr-defined]
 
     # 数据范围只在有租户上下文时才生效——跨租户的裸查不叠数据范围。
     if tenant_id is not None:
@@ -84,13 +88,15 @@ def _build_criteria_map() -> dict[type, Callable[[type], Any]]:
             # 有租户但没用户 ⇒ 无法判定「自己」，此时必须拒绝而不是放行，
             # 否则 SELF 会退化成 ALL。用恒假条件表达「一条都别给」。
             criteria[DataScopedMixin] = (
-                (lambda cls: cls.owner_id == user_id)
+                (lambda cls: cls.owner_id == user_id)  # type: ignore[attr-defined]
                 if user_id is not None
                 else (lambda cls: False)
             )
         elif scope == DataScope.DEPT:
             criteria[DataScopedMixin] = (
-                (lambda cls: cls.dept_id == dept_id) if dept_id is not None else (lambda cls: False)
+                (lambda cls: cls.dept_id == dept_id)  # type: ignore[attr-defined]
+                if dept_id is not None
+                else (lambda cls: False)
             )
         # ALL：不加额外条件，但仍受上层租户过滤约束。
 

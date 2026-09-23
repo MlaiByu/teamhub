@@ -265,10 +265,6 @@ async def update_task(
 
     await session.commit()
 
-    # 理由同 project_service：`updated_at` 是服务端 onupdate 生成的，
-    # UPDATE 后会被标记过期，异步下访问会抛 MissingGreenlet。
-    await session.refresh(task)
-
     logger.info("task_updated", task_id=task_id, fields=sorted(changes))
 
     await audit_service.record(
@@ -330,8 +326,6 @@ async def change_status(
 
     task.status = str(target)
     await session.commit()
-    # 同 project/task 的 update：updated_at 是服务端生成的，UPDATE 后会过期
-    await session.refresh(task)
     logger.info("task_status_changed", task_id=task_id, status=str(target))
 
     await audit_service.record(

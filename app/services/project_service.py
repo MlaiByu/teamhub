@@ -96,17 +96,9 @@ async def update_project(session: AsyncSession, project_id: int, *, changes: dic
 
     await session.commit()
 
-    # ★ 必须 refresh，否则序列化时会炸 MissingGreenlet。
-    #
-    #   `updated_at` 用的是 server-side 的 `onupdate=func.now()`——值由数据库生成。
-    #   SQLAlchemy 在 UPDATE 之后会把这类「服务端生成」的列标记为**过期**，
-    #   下次访问它就需要回库取。同步代码里这只是一次隐式 SELECT，
-    #   但异步下隐式 IO 会直接抛
-    #   `MissingGreenlet: greenlet_spawn has not been called`。
-    #
-    #   注意 INSERT 不受影响：插入时会顺带把 server_default 取回来，
-    #   所以 create 路径不需要 refresh——只有 update 路径才会踩到。
-    await session.refresh(project)
+    # （无 refresh：updated_at 已改为 Python 侧 onupdate，SQLAlchemy 知道新值，
+    #   UPDATE 后不会标记过期，也就不再需要 refresh 来避免 MissingGreenlet。
+    #   见 core/db/base.py::TimestampMixin 的说明。）
 
     logger.info("project_updated", project_id=project_id, fields=sorted(changes))
     await audit_service.record(
