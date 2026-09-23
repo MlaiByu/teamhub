@@ -53,7 +53,13 @@ jobs:
         run: pytest tests/security -v
 
       - name: All tests + coverage
-        run: pytest --cov=app --cov-report=term-missing --cov-report=xml
+        # ★ --cov-fail-under：覆盖率**跌破门槛即阻断**。
+        #   只报告不阻断的覆盖率等于没有约束——它会一路缓慢下滑，
+        #   而每次下滑单独看都「只降了一点点」。
+        #   门槛取 90（当前 ~95），留出正常波动余量，避免变成噪音。
+        run: |
+          pytest --cov=app --cov-report=term-missing --cov-report=xml \
+                 --cov-fail-under=90
 
       - name: Upload coverage
         uses: actions/upload-artifact@v4
