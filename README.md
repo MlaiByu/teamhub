@@ -469,13 +469,115 @@ pytest --cov=app --cov-report=term-missing
 > 越权路径」。** 前 5 周每个功能都配了测试，但都是「这个接口对不对」；
 > 矩阵问的是「同一个接口，换个身份还对不对」——后者才是越权的检测方式。
 
-下一阶段目标（第 7 周）：**Celery 异步任务**（邮件异步发出、审计异步落库）。
+## 第 7 周交付状态（Celery 异步任务）
 
-> 方案十二第 7 周原定「WebSocket 通知 + Celery 异步任务」两项。
-> **WebSocket 通知已在第 4 周随事件系统一并落地**（`WS /api/v1/ws` + 6 类事件推送，
-> 含真实连接端到端验证），所以第 7 周实际只剩 Celery 这一半。
-> 届时审计的 `record` 换成 `record.delay`、通知改用 outbox 投递，
-> 调用点与签名均已留好位置（见对应模块 docstring）。
+| 模块 | 内容 |
+|---|---|
+| `app/tasks/celery_app.py` | Celery 实例 + 配置 + beat 定时表 |
+| `app/tasks/context.py` | **租户上下文守卫**（`@tenant_task` / `run_async`） |
+| `app/tasks/maintenance.py` | 过期 refresh token 清理（beat 每日） |
+| `app/tasks/email.py` | 邮件异步发送（带重试） |
+| `app/tasks/audit.py` | 审计异步落库（可选路径） |
+| `app/core/mailer.py` | 邮件后端：Console（零依赖）/ SMTP |
+
+**360 项测试全绿**（含 79 项安全测试），覆盖率 95%，mypy 全绿，CI 绿。
+
+### ★★ 本阶段最重要的产出：修复了一个既有的跨租户批量写漏洞
+
+**发现过程**：写清理任务时隔离测试失败——`removed=2`，租户 B 的过期令牌也被删了。
+
+**根因（实测确认，不是推测）**：`do_orm_execute` 钩子注入的
+`with_loader_criteria` **只作用于实体加载（SELECT）**，对 bulk UPDATE/DELETE
+**完全不生效**。在租户 1 的上下文里执行不带租户条件的 `DELETE`，
+两个租户的行一起被删掉。
+
+这推翻了项目此前的一条隐含假设——「业务代码不手写 `tenant_id`，钩子会注入」
+**只对查询成立**。修复前有 4 处批量写踩坑，其中 **3 处是既有的**（第 2 周起就存在）：
+
+| 位置 | 后果 |
+|---|---|
+| `revoke_chain` | 在 A 租户登出 → 把该用户在**所有租户**的会话一起踢掉 |
+| `mark_one_read` | 在 A 租户标已读 → **其他租户**的通知被标记已读 |
+| `mark_all_read` | 在 A 租户点「全部已读」→ 清空**其他租户**的未读 |
+| `purge_expired` | 删所有租户的过期令牌 |
+
+**修法不是「逐处记得手写 `tenant_id`」**（那还会再漏），而是在
+`TenantAwareRepository` 上提供 `bulk_update()` / `bulk_delete()`，
+把租户条件固化进封装，调用方**没有机会漏写**。
+bypass 下条件是 `tenant_id == 0`（匹配不到行）——**刻意的安全失败**：
+跨租户批量写必须走会写审计的 `bypass_update`。
+
+回归测试 `tests/security/test_bulk_write_isolation.py`（6 项），
+并且**反向验证过有效性**：临时摘掉租户条件后 5 个测试失败，
+证明它们真能抓到该漏洞，不是恒绿。
+
+### 租户上下文守卫（PROJECT-PLAN 风险 2 落地点）
+
+Celery worker 是独立进程，**不经过任何中间件**，没有 `contextvar`。
+「忘了设上下文」的后果不是报错，而是钩子不过滤 → 任务操作**所有租户**的数据。
+
+三条对策缺一不可：
+
+1. **任务入参显式携带 `tenant_id`** —— 让「需要租户」成为签名的一部分
+2. **入口 set、出口 finally reset** —— 由 `@tenant_task` 统一做，
+   不靠每个任务自己记得（`finally reset` 不能省：worker 进程会被复用，
+   不复位 = 下一个任务带着上一个租户的上下文执行）
+3. **缺 `tenant_id` 直接拒绝执行** —— 宁可任务失败，也不在无过滤状态下跑完
+
+`data_scope` 必须设 **ALL**（不是 SELF）：任务代表系统而非某个用户；
+设 SELF 且无 `user_id` 时钩子条件会退化成**恒假**，任务什么都查不到。
+
+### 另一个踩到的真问题：`asyncio.run` 与 eager 模式的冲突
+
+任务函数是同步的，调 async service 需要 `asyncio.run()`。但 **eager 模式
+（本地开发默认）下 `.delay()` 是当前线程同步执行的**，如果调用方在 async
+上下文里（最典型：FastAPI async 路由里发邮件），线程中已有 running loop，
+`asyncio.run()` 直接抛：
+
+```
+RuntimeError: asyncio.run() cannot be called from a running event loop
+```
+
+而「开发时 eager + 在 async 接口里触发任务」正是最日常的用法。
+`run_async()` 两条路径都支持：无 loop 走 `asyncio.run`，有 loop 则另起线程——
+且**必须用 `contextvars.copy_context()` 把租户上下文带过去**
+（新线程不继承 contextvar，漏了这一步 = 新线程无租户上下文 = 跨租户）。
+
+### 定期清理：平台级扇出 + 租户级执行
+
+两层的理由是**上下文安全**：清理要处理所有租户，但每个租户只能在自己的
+上下文下操作。若在同一任务里循环所有租户、反复 set/reset，只要漏一次 reset，
+下一个租户就带着上一个租户的上下文执行 → 跨租户误删且不报错。
+拆开后租户级任务单次只服务一个租户，上下文由装饰器统一管理。
+
+清理只删 `expires_at < now - retention_days` 的行。
+**已撤销但未过期的必须保留**——复用检测靠它（`revoked_reason == "ROTATED"`）；
+删了的话攻击者拿旧令牌只会得到「令牌不存在」，复用告警永不触发。
+
+### 对方案的一处**有意取舍**：审计保持同步落库
+
+方案 62 写的是「邮件、导出、**审计异步落库**」。本项目的实际选择：
+**审计默认同步落库**，异步路径（`audit_service.record_deferred()`）保留但不用。
+
+理由：
+- 审计是**单行 INSERT**，不是瓶颈——真正的瓶颈是邮件的网络 IO（已异步）
+- 审计的价值恰恰在**可靠**。异步化会引入「worker 挂了这条审计就没了」，
+  等于把审计的意义削掉一半
+- 方案说「异步」的意图是「不阻塞请求」，而审计已经在业务 commit **之后**执行、
+  且只有一次单行写入，阻塞可忽略
+
+`record_deferred()` 留给「量大且可容忍丢失」的场景（高频读取埋点、用量统计）。
+业务写操作一律用 `record()`。这是**保留能力但把默认设成可靠**，而非不做。
+
+### 顺带修掉的既存缺口
+
+`app/tasks/celery_app.py` **此前根本不存在**，而 `docker-compose.yml` 的
+`worker` 与 `beat` 两个服务都引用 `app.tasks.celery_app` ——
+也就是 `docker compose up` 的这两个服务**一定会启动失败**。
+这是第 9 周「一键起」的阻塞点，本阶段补上。
+
+下一阶段目标（第 8 周）：Redis 缓存 + 限流 + 缓存 key 租户前缀
+（超配额返回 42900，PROJECT-PLAN 十二）。
 
 ---
 
