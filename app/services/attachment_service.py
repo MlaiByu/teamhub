@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.constants import AttachmentBizType
 from app.core.db.context import current_tenant_id
+from app.core.db.session import safe_rollback
 from app.core.exceptions import ConflictError, NotFoundError, ParamInvalidError
 from app.core.logging import get_logger
 from app.core.storage import LocalStorage, safe_ext, storage
@@ -118,7 +119,8 @@ async def upload(
         await session.flush()
         await session.commit()
     except Exception:
-        await session.rollback()
+        # ★ safe_rollback：清理失败不能替换掉原始异常
+        await safe_rollback(session, context="attachment.upload")
         await active_backend.delete(rel_path)
         raise
 

@@ -48,6 +48,7 @@ from app.core.db.context import (
     set_context,
     snapshot_context,
 )
+from app.core.db.session import safe_rollback
 from app.core.exceptions import (
     ConflictError,
     NotFoundError,
@@ -272,7 +273,9 @@ async def register(session: AsyncSession, *, payload: RegisterRequest) -> Regist
         await session.flush()  # 拿 user.id
     except IntegrityError as exc:
         # 并发注册同名用户：预检都通过了，靠约束兜住
-        await session.rollback()
+        # ★ safe_rollback：若清理本身抛异常，会把 ConflictError 替换成 500，
+        #   用户看到的状态码就从 409 变成了 500
+        await safe_rollback(session, context="auth.register")
         raise ConflictError("用户名已被占用") from exc
 
     tenant_repo = TenantRepository(session)
@@ -310,7 +313,7 @@ async def register(session: AsyncSession, *, payload: RegisterRequest) -> Regist
         )
         await session.commit()
     except IntegrityError as exc:
-        await session.rollback()
+        await safe_rollback(session, context="auth.register.tenant")
         raise ConflictError("注册失败：资源冲突，请重试") from exc
     finally:
         restore_context(previous)

@@ -26,6 +26,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db.context import current_client_ip, current_tenant_id, current_user_id
+from app.core.db.session import safe_rollback
 from app.core.logging import get_logger
 from app.repositories.audit import AuditLogRepository
 
@@ -71,9 +72,12 @@ async def record(
         )
         await session.commit()
     except Exception:
-        # 审计失败绝不能回滚业务（业务变更已 commit，这里 rollback 只回审计）
-        await session.rollback()
+        # 先记原始异常，再做清理——顺序反了会让日志只剩清理失败
         logger.exception("audit_write_failed", action=action, entity_type=entity_type)
+        # 审计失败绝不能回滚业务（业务变更已 commit，这里 rollback 只回审计）。
+        # ★ 用 safe_rollback：连接坏掉时 rollback 自己也会抛，
+        #   那会让「审计失败」升级成「接口 500」，正好违背本函数的承诺。
+        await safe_rollback(session, context="audit.record")
 
 
 __all__ = ["record", "record_deferred"]

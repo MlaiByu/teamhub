@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.router import api_router
@@ -20,8 +20,10 @@ from app.core.config import settings
 from app.core.db.session import engine
 from app.core.exceptions import register_exception_handlers
 from app.core.logging import configure_logging, get_logger
+from app.core.metrics import render_metrics
 from app.core.redis import close_redis, init_redis
 from app.middleware import (
+    MetricsMiddleware,
     RateLimitMiddleware,
     RequestIDMiddleware,
     TenantContextMiddleware,
@@ -101,6 +103,10 @@ def create_app() -> FastAPI:
     # 注意顺序：add_middleware 是栈式（后进先出）
     app.add_middleware(RateLimitMiddleware)
     app.add_middleware(TenantContextMiddleware)
+    # Metrics 放在 TenantContext **外**层：
+    # ① 被限流拒绝的 429 也要计入指标，而限流在内层；
+    # ② 它不需要租户上下文（指标标签刻意不带 tenant_id，见 core/metrics.py）。
+    app.add_middleware(MetricsMiddleware)
     app.add_middleware(RequestIDMiddleware)
 
     app.add_middleware(
@@ -122,6 +128,27 @@ def create_app() -> FastAPI:
         会把「DB 连不上」和「服务没起来」混为一谈。
         """
         return {"code": 0, "message": "ok", "data": {"status": "healthy", "env": settings.app_env}}
+
+    @app.get(
+        "/metrics",
+        tags=["系统"],
+        summary="Prometheus 指标",
+        include_in_schema=False,  # 运维端点，不混进业务 API 文档
+    )
+    async def metrics_endpoint() -> Response:
+        """Prometheus 指标暴露（PROJECT-PLAN 11.4）。
+
+        ★ **不鉴权**，这是 Prometheus 生态的惯例（抓取端通常在内网）。
+          代价是「谁都能看到平台的整体量级」——所以指标里**刻意不含**
+          租户标识、用户名这类信息（理由见 `core/metrics.py` 的说明）。
+
+        ★ 无租户上下文 ⇒ 不参与租户配额（RateLimitMiddleware 会跳过它），
+          否则监控抓取会把某个租户的额度吃掉。
+        """
+        return Response(
+            content=render_metrics(),
+            media_type="text/plain; version=0.0.4; charset=utf-8",
+        )
 
     return app
 

@@ -1,0 +1,74 @@
+{
+  "base_url": "http://127.0.0.1:8000",
+  "concurrency": 20,
+  "total_per_scenario": 800,
+  "results": [
+    {
+      "name": "GET /health（最轻路径，不含 DB / 鉴权）",
+      "concurrency": 20,
+      "total": 800,
+      "wall_seconds": 3.188,
+      "qps": 250.9,
+      "succeeded": 800,
+      "failed": 0,
+      "error_rate": 0.0,
+      "latency_ms": {
+        "min": 19.94,
+        "mean": 76.72,
+        "p50": 61.34,
+        "p95": 179.09,
+        "p99": 258.12,
+        "max": 329.92
+      },
+      "status_counts": {
+        "200": 800
+      },
+      "errors": {}
+    },
+    {
+      "name": "GET /api/v1/projects（鉴权 + DB + 限流 + 指标采集）",
+      "concurrency": 20,
+      "total": 800,
+      "wall_seconds": 5.106,
+      "qps": 156.7,
+      "succeeded": 800,
+      "failed": 0,
+      "error_rate": 0.0,
+      "latency_ms": {
+        "min": 49.59,
+        "mean": 126.0,
+        "p50": 112.1,
+        "p95": 196.96,
+        "p99": 257.16,
+        "max": 317.43
+      },
+      "status_counts": {
+        "200": 800
+      },
+      "errors": {}
+    },
+    {
+      "name": "混合（80% 列表读 + 20% 建项目写）",
+      "concurrency": 20,
+      "total": 800,
+      "wall_seconds": 14.348,
+      "qps": 55.8,
+      "succeeded": 800,
+      "failed": 0,
+      "error_rate": 0.0,
+      "latency_ms": {
+        "min": 44.62,
+        "mean": 349.37,
+        "p50": 222.52,
+        "p95": 1049.85,
+        "p99": 2396.4,
+        "max": 3973.34
+      },
+      "status_counts": {
+        "200": 640,
+        "201": 160
+      },
+      "errors": {}
+    }
+  ]
+}

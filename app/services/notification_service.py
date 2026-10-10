@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import cache
 from app.core.constants import MemberStatus
 from app.core.db.context import current_tenant_id
+from app.core.db.session import safe_rollback
 from app.core.logging import get_logger
 from app.realtime.events import EventType, NotificationEvent, render_title
 from app.realtime.manager import ConnectionManager, manager
@@ -149,12 +150,13 @@ async def emit(
         )
         await session.commit()
     except Exception:
-        await session.rollback()
+        # ★ 先记原始异常再清理（顺序反了日志只剩清理失败）
         logger.exception(
             "notification_persist_failed",
             event_type=str(event.type),
             target_user_id=event.target_user_id,
         )
+        await safe_rollback(session, context="notification.emit")
         return None
 
     # 落库成功后才推送——顺序反了会产生「幽灵通知」
