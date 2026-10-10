@@ -26,31 +26,43 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      # ★ 改用 uv + 锁文件安装（2026-10-10）。
+      #   起因是一个真实事故：`pyproject` 写的是 `mypy>=1.13`（无上界），
+      #   于是 CI 每次都装「当时最新」的 mypy。2026-10-10 mypy 发了 2.4.0，
+      #   它的**新检查**让 CI 变红——而报错的两处代码**一行都没被改过**，
+      #   只是过去就存在「不够精确的类型标注」，被新规则照出来了。
+      #
+      #   也就是说：那天「代码是好的、CI 是红的」，且两者毫无因果关系。
+      #   这是比任何单次失败都更糟的信号——**它意味着 CI 的结果不可复现**。
+      #
+      #   根治不是给 mypy 加上界（那只是把风险推后，且加了界 lock 就失配），
+      #   而是让 CI 与本地**装同一个版本**：uv.lock 已入库，`--frozen` 保证
+      #   「锁文件与 pyproject 不一致时直接失败」，绝不在 CI 上悄悄升级依赖。
+      #
+      #   附带收益：不再需要 actions/setup-python——Python 版本由
+      #   `.python-version`（3.12.10）经 uv 管理，与本地开发机一致。
+      - uses: astral-sh/setup-uv@v5
         with:
-          python-version: "3.12"
-          cache: pip
+          enable-cache: true
 
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+        run: uv sync --frozen --extra dev
 
       - name: Lint (ruff check)
-        run: ruff check app tests
+        run: uv run --frozen ruff check app tests
 
       - name: Format check (ruff format)
-        run: ruff format --check app tests
+        run: uv run --frozen ruff format --check app tests
 
       - name: Type check (mypy)
-        run: mypy app
+        run: uv run --frozen mypy app
         # 阶段 4 承诺：mypy 转硬失败。此前 4 个遗留错误已清零，
         # 现在 mypy 全绿，失败即阻断——不再用 continue-on-error 掩盖类型错误。
 
       # ★ 安全测试单独跑一步，且失败即阻断
       # 隔离与越权测试是项目第一优先，不该和业务测试混在一起被忽略
       - name: Security tests (tenant isolation)
-        run: pytest tests/security -v
+        run: uv run --frozen pytest tests/security -v
 
       - name: All tests + coverage
         # ★ --cov-fail-under：覆盖率**跌破门槛即阻断**。
@@ -58,7 +70,7 @@ jobs:
         #   而每次下滑单独看都「只降了一点点」。
         #   门槛取 90（当前 ~95），留出正常波动余量，避免变成噪音。
         run: |
-          pytest --cov=app --cov-report=term-missing --cov-report=xml \
+          uv run --frozen pytest --cov=app --cov-report=term-missing --cov-report=xml \
                  --cov-fail-under=90
 
       - name: Upload coverage

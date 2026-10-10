@@ -34,6 +34,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Mapping
 from typing import Any
 
 # Prometheus 默认的直方图分桶（秒）。覆盖「本地内存库的微秒级」
@@ -249,7 +250,7 @@ def reset_metrics() -> None:
         metric.reset()
 
 
-def route_label(scope: dict[str, Any]) -> str:
+def route_label(scope: Mapping[str, Any]) -> str:
     """从 ASGI scope 里取「路由模板」作为 path 标签。
 
     取不到时（404 未匹配任何路由、中间件短路等）返回 `<unmatched>`，
