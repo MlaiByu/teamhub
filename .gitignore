@@ -51,4 +51,6 @@ Thumbs.db
 # 推送前扫描（repo-publish-preflight）会把它们标为不应入库的路径——
 # 其中确实含 C:\Users\<本机用户名>\... 这类开发机绝对路径。
 # 本地文件保留，不影响记忆机制；只是不随仓库公开。
-.workbuddy/memory/
+# 2026-09-29 扩大为整个 .workbuddy/：新增的 LOCAL-DEV-NOTES.md 同样含本机绝对路径
+# （D:\python\... 等）与本机 SAC 环境特有的踩坑记录，同属「工作区私有」。
+.workbuddy/
